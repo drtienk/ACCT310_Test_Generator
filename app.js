@@ -177,6 +177,7 @@ class PDFParser {
     async parseFinancialByPage(pdfDoc, fileMeta) {
         const questions = [];
         const fileBaseName = (fileMeta && fileMeta.name ? fileMeta.name : 'FA').replace(/\.pdf$/i, '');
+        const pageDiagnostics = [];
 
         console.log('[Financial] 開始解析: ' + fileBaseName + ', 共 ' + pdfDoc.numPages + ' 頁');
 
@@ -185,48 +186,113 @@ class PDFParser {
                 const page = await pdfDoc.getPage(pageNum);
                 const textContent = await page.getTextContent();
                 const rawLines = this.reconstructLines(textContent.items);
-                const lines = rawLines.map(function(l) { return (l || '').trim(); }).filter(function(l) { return l.length > 0; });
+                const lines = this.normalizeFinancialLines(rawLines);
 
                 const q = this.parseFinancialOnePage(lines, pageNum, fileBaseName);
 
                 if (q) {
                     questions.push(q);
+                    pageDiagnostics.push({ page: pageNum, ok: true, reason: 'parsed' });
                     console.log('[Financial][' + fileBaseName + '][p' + pageNum + '] ✓ opts=' + q.options.length + ', answer=' + q.correctOption);
                 } else {
+                    pageDiagnostics.push({ page: pageNum, ok: false, reason: 'no-question' });
                     console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] ✗ 未解析出題目');
                 }
             } catch (e) {
+                pageDiagnostics.push({ page: pageNum, ok: false, reason: 'exception: ' + e.message });
                 console.error('[Financial][' + fileBaseName + '][p' + pageNum + '] 異常:', e.message);
             }
+        }
+
+        const failedCount = pageDiagnostics.filter(function(d) { return !d.ok; }).length;
+        if (failedCount > 0) {
+            console.warn('[Financial][' + fileBaseName + '] 解析摘要: success=' + (pageDiagnostics.length - failedCount) + ', failed=' + failedCount);
         }
 
         console.log('[Financial] ' + fileBaseName + ': 總共 ' + questions.length + ' 題');
         return questions;
     }
 
+    normalizeFinancialLines(rawLines) {
+        return (rawLines || [])
+            .map(function(l) { return String(l == null ? '' : l).replace(/\s+/g, ' ').trim(); })
+            .filter(function(l) { return l.length > 0; });
+    }
+
+    removeFinancialNoiseLines(lines) {
+        const noisePatterns = [
+            /^revision\s*:/i,
+            /^page\s*\d+/i,
+            /^assignment\s+print\s+view/i,
+            /^question\s+help/i,
+            /^attempt\s+history/i,
+            /^show\s+all\s+feedback/i,
+            /^hide\s+all\s+feedback/i,
+            /^score\s*:/i,
+            /^time\s+elapsed\s*:/i
+        ];
+
+        return (lines || []).filter(function(line) {
+            for (var i = 0; i < noisePatterns.length; i++) {
+                if (noisePatterns[i].test(line)) return false;
+            }
+            return true;
+        });
+    }
+
+    findFinancialStartIndex(lines) {
+        var awardPattern = /^\d+\.\s*Award:\s*\d+(\.\d+)?\s*point(s)?/i;
+        for (var i = 0; i < lines.length; i++) {
+            if (awardPattern.test(lines[i])) return i;
+        }
+        return -1;
+    }
+
+    getFinancialQuestionId(awardLine, pageNum, fileBaseName) {
+        var m = String(awardLine || '').match(/^(\d+)\./);
+        if (m) return fileBaseName + '-q' + m[1] + '-p' + pageNum;
+        return fileBaseName + '-p' + pageNum;
+    }
+
+    detectFinancialCorrectOptionFromText(lines, optionCount) {
+        if (!lines || optionCount < 1) return -1;
+        const text = lines.join(' ').toLowerCase();
+        var m = text.match(/(?:correct\s+answer|answer|solution)\s*[:\-]?\s*([a-e])/i);
+        if (m) {
+            const idx = m[1].toLowerCase().charCodeAt(0) - 97;
+            if (idx >= 0 && idx < optionCount) return idx;
+        }
+        return -1;
+    }
+
+    cleanFinancialFeedbackLine(line) {
+        let out = String(line == null ? '' : line).trim();
+        out = out.replace(/^feedback\s*[:：]?\s*/i, '').trim();
+        out = out.replace(/^explanation\s*[:：]?\s*/i, '').trim();
+        out = out.replace(/^solution\s*[:：]?\s*/i, '').trim();
+        return out;
+    }
+
     parseFinancialOnePage(lines, pageNum, fileBaseName) {
         var CIRCLE = '\uEA56';
         var ARROW = '\uEA57';
 
-        var awardPattern = /^\d+\.\s*Award:\s*\d+(\.\d+)?\s*point(s)?/i;
-        var awardIdx = -1;
-        for (var i = 0; i < lines.length; i++) {
-            if (awardPattern.test(lines[i])) {
-                awardIdx = i;
-                break;
-            }
-        }
+        var normalizedLines = this.normalizeFinancialLines(lines);
+        var cleanedLines = this.removeFinancialNoiseLines(normalizedLines);
+        var awardIdx = this.findFinancialStartIndex(cleanedLines);
 
         if (awardIdx < 0) {
             console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 未找到 Award 行');
             return null;
         }
 
-        var content = lines.slice(awardIdx + 1);
+        var awardLine = cleanedLines[awardIdx] || '';
+        var questionId = this.getFinancialQuestionId(awardLine, pageNum, fileBaseName);
+        var content = cleanedLines.slice(awardIdx + 1);
 
         var endIdx = content.length;
         for (var i = 0; i < content.length; i++) {
-            if (/^References$/i.test(content[i]) || /^Multiple Choice/i.test(content[i])) {
+            if (/^References$/i.test(content[i]) || /^Multiple Choice/i.test(content[i]) || /^Question\s+\d+/i.test(content[i])) {
                 endIdx = i;
                 break;
             }
@@ -237,27 +303,40 @@ class PDFParser {
         var questionLines = [];
         var optionLines = [];
         var foundFirstOption = false;
+        var currentOptionLine = null;
 
         for (var i = 0; i < questionContent.length; i++) {
             var line = questionContent[i];
-            if (line.indexOf(CIRCLE) !== -1) {
+            var hasCircle = line.indexOf(CIRCLE) !== -1;
+            var hasArrow = line.indexOf(ARROW) !== -1;
+            if (hasCircle || (hasArrow && foundFirstOption)) {
                 foundFirstOption = true;
-                if (optionLines.length < 4) {
-                    optionLines.push(line);
+                if (currentOptionLine != null) {
+                    optionLines.push(currentOptionLine.trim());
                 }
+                currentOptionLine = line;
             } else if (!foundFirstOption) {
                 questionLines.push(line);
+            } else {
+                if (currentOptionLine != null) {
+                    currentOptionLine += ' ' + line;
+                }
             }
+        }
+        if (currentOptionLine != null) {
+            optionLines.push(currentOptionLine.trim());
         }
 
         var options = [];
         var answerIndex = -1;
+        var answerDetectedByArrow = false;
 
         for (var i = 0; i < optionLines.length; i++) {
             var optText = optionLines[i];
 
             if (optText.indexOf(ARROW) !== -1) {
                 answerIndex = i;
+                answerDetectedByArrow = true;
             }
 
             optText = optText.split(CIRCLE).join('');
@@ -268,14 +347,44 @@ class PDFParser {
             options.push(letter + '. ' + optText);
         }
 
-        if (options.length < 3) {
+        if (options.length < 2) {
+            // fallback: 嘗試從 a./b./c. 標記拆出選項
+            var combinedText = questionContent.join(' ');
+            var fallbackOptions = [];
+            var letterPattern = /(?:^|\s)([a-e])\.\s*/ig;
+            var matches = [];
+            var m;
+            while ((m = letterPattern.exec(combinedText)) !== null) {
+                matches.push({ idx: m.index, letter: m[1].toLowerCase() });
+            }
+            for (var j = 0; j < matches.length; j++) {
+                var start = matches[j].idx;
+                var end = (j + 1 < matches.length) ? matches[j + 1].idx : combinedText.length;
+                var slice = combinedText.substring(start, end).trim();
+                var normalized = slice.replace(/^([a-e])\.\s*/i, '$1. ').replace(/\s+/g, ' ').trim();
+                if (normalized) fallbackOptions.push(normalized);
+            }
+            if (fallbackOptions.length >= 2) {
+                options = fallbackOptions;
+            }
+        }
+
+        if (options.length < 2) {
             console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 選項不足: ' + options.length);
             return null;
         }
 
         if (answerIndex < 0) {
-            console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 未找到正確答案標記（箭頭）');
-            return null;
+            answerIndex = this.detectFinancialCorrectOptionFromText(questionContent, options.length);
+            if (answerIndex >= 0) {
+                console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 箭頭缺失，改用文字 fallback 辨識答案');
+            }
+        }
+
+        if (answerIndex < 0) {
+            // 最後保底：保留題目但標記為 a，避免整頁掉題
+            answerIndex = 0;
+            console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 未找到答案標記，使用保底答案 a');
         }
 
         var lastOptionIdx = -1;
@@ -289,8 +398,14 @@ class PDFParser {
         if (lastOptionIdx >= 0) {
             for (var i = lastOptionIdx + 1; i < questionContent.length; i++) {
                 var line = questionContent[i].trim();
-                if (line && line.indexOf(CIRCLE) === -1 && line.indexOf(ARROW) === -1) {
-                    feedbackLines.push(line);
+                if (!line) continue;
+                if (line.indexOf(CIRCLE) !== -1 || line.indexOf(ARROW) !== -1) continue;
+                if (/^(References|Multiple Choice)$/i.test(line)) continue;
+                if (/^revision\s*:/i.test(line)) continue;
+                if (/^Question\s+\d+/i.test(line)) continue;
+                var cleaned = this.cleanFinancialFeedbackLine(line);
+                if (cleaned) {
+                    feedbackLines.push(cleaned);
                 }
             }
         }
@@ -306,11 +421,11 @@ class PDFParser {
         var correctLetter = String.fromCharCode(97 + answerIndex);
 
         return {
-            originalId: fileBaseName + '-p' + pageNum,
+            originalId: questionId,
             questionText: questionText,
             options: options,
             correctOption: correctLetter,
-            hasCheckmark: true,
+            hasCheckmark: answerDetectedByArrow,
             feedbackText: feedbackText
         };
     }
@@ -742,6 +857,48 @@ function replaceFirstQuestionNumberWithRoman(tblXmlString, romanLabel) {
     return tblXmlString;
 }
 
+
+/**
+ * 將單題 XML（<w:tbl> 或 <w:p>）內第一個題號改成阿拉伯數字（如 21. ）
+ * @param {string} xmlString
+ * @param {number|string} questionNumber
+ * @returns {string}
+ */
+function replaceFirstQuestionNumberWithArabic(xmlString, questionNumber) {
+    if (!xmlString || typeof xmlString !== 'string') return xmlString;
+    const num = parseInt(questionNumber, 10);
+    if (isNaN(num) || num < 1) return xmlString;
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlString, 'application/xml');
+    const parseErr = doc.querySelector('parsererror');
+    if (parseErr) return xmlString;
+    const root = doc.documentElement;
+    if (!root) return xmlString;
+
+    const tNodes = root.getElementsByTagNameNS(W_NS, 't');
+    const re = /^\s*\d{1,4}\.\s*/;
+    for (let i = 0; i < tNodes.length; i++) {
+        const t = tNodes[i];
+        const text = t.textContent || '';
+        if (re.test(text)) {
+            t.textContent = text.replace(re, String(num) + '. ');
+            return new XMLSerializer().serializeToString(root);
+        }
+    }
+
+    // fallback：找不到原題號時，補在第一個文字節點前
+    if (tNodes.length > 0) {
+        tNodes[0].textContent = String(num) + '. ' + (tNodes[0].textContent || '').replace(/^\s*/, '');
+        return new XMLSerializer().serializeToString(root);
+    }
+    return xmlString;
+}
+
+function sanitizeNonMcForQuestionSheet(xmlString) {
+    const stripped = stripAnswerFromWordTblXml(xmlString);
+    return appendBlankAnswerSpaceToTblXml_NoLines(stripped, 12);
+}
+
 // 遞迴取得元素內所有 w:t 的文字（題號在 w:tbl → w:tc → w:p → w:t 內）
 function getAllTextFromElement(elem) {
     const tNodes = elem.getElementsByTagNameNS(W_NS, 't');
@@ -1109,8 +1266,7 @@ async function injectNonMcIntoQuestionsDocx(questionsBlobFromDocxJs, selectedWor
         const startRoman = 2; // II = 2
         const insertXml = selectedWordQuestions
             .map((q, idx) => {
-                const stripped = stripAnswerFromWordTblXml(q.xmlString);
-                const withSpace = appendBlankAnswerSpaceToTblXml_NoLines(stripped, 12);
+                const withSpace = sanitizeNonMcForQuestionSheet(q.xmlString);
                 const romanLabel = toRoman(startRoman + idx);
                 return replaceFirstQuestionNumberWithRoman(withSpace, romanLabel);
             })
@@ -1128,6 +1284,90 @@ async function injectNonMcIntoQuestionsDocx(questionsBlobFromDocxJs, selectedWor
     } catch (e) {
         console.error('[injectNonMc] 注入失敗:', e);
         return questionsBlobFromDocxJs;
+    }
+}
+
+
+
+async function injectFinancialNonMcIntoQuestionsDocx(questionsBlobFromDocxJs, selectedWordQuestions, startQuestionNumber) {
+    try {
+        const arrayBuffer = await questionsBlobFromDocxJs.arrayBuffer();
+        const questionsZip = await JSZip.loadAsync(arrayBuffer);
+        let documentXml = await questionsZip.file('word/document.xml').async('string');
+        const markerIndex = documentXml.indexOf(NONMC_INSERT_MARKER);
+        if (markerIndex === -1) {
+            console.warn('[injectFinancialNonMc] 找不到插入點 marker，跳過 XML 注入');
+            return questionsBlobFromDocxJs;
+        }
+        const pStartSearch = documentXml.lastIndexOf('<w:p', markerIndex);
+        const pEndSearch = documentXml.indexOf('</w:p>', markerIndex);
+        if (pStartSearch === -1 || pEndSearch === -1) {
+            console.warn('[injectFinancialNonMc] 無法定位 marker 段落，跳過 XML 注入');
+            return questionsBlobFromDocxJs;
+        }
+        const pEnd = pEndSearch + '</w:p>'.length;
+        const start = (parseInt(startQuestionNumber, 10) || 0) + 1;
+        const insertXml = selectedWordQuestions
+            .map((q, idx) => {
+                const cleanedForQuestionSheet = sanitizeNonMcForQuestionSheet(q.xmlString);
+                return replaceFirstQuestionNumberWithArabic(cleanedForQuestionSheet, start + idx);
+            })
+            .join('\n');
+
+        const pageBreakXml = buildPageBreakParagraphXml();
+        documentXml = documentXml.substring(0, pStartSearch) + pageBreakXml + '\n' + insertXml + documentXml.substring(pEnd);
+        questionsZip.file('word/document.xml', documentXml);
+        const newBlob = await questionsZip.generateAsync({
+            type: 'blob',
+            mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            compression: 'DEFLATE'
+        });
+        console.log('[injectFinancialNonMc] XML 注入完成，共注入 ' + selectedWordQuestions.length + ' 題，起始題號=' + start);
+        return newBlob;
+    } catch (e) {
+        console.error('[injectFinancialNonMc] 注入失敗:', e);
+        return questionsBlobFromDocxJs;
+    }
+}
+
+
+
+async function injectFinancialNonMcIntoAnswersDocx(answersBlobFromDocxJs, selectedWordQuestions, startQuestionNumber) {
+    try {
+        const arrayBuffer = await answersBlobFromDocxJs.arrayBuffer();
+        const answersZip = await JSZip.loadAsync(arrayBuffer);
+        let documentXml = await answersZip.file('word/document.xml').async('string');
+        const markerIndex = documentXml.indexOf(NONMC_ANSWER_INSERT_MARKER);
+        if (markerIndex === -1) {
+            console.warn('[injectFinancialNonMcAnswers] 找不到插入點 marker，跳過 XML 注入');
+            return answersBlobFromDocxJs;
+        }
+        const pStartSearch = documentXml.lastIndexOf('<w:p', markerIndex);
+        const pEndSearch = documentXml.indexOf('</w:p>', markerIndex);
+        if (pStartSearch === -1 || pEndSearch === -1) {
+            console.warn('[injectFinancialNonMcAnswers] 無法定位 marker 段落，跳過 XML 注入');
+            return answersBlobFromDocxJs;
+        }
+        const pEnd = pEndSearch + '</w:p>'.length;
+        const start = (parseInt(startQuestionNumber, 10) || 0) + 1;
+        const insertXml = selectedWordQuestions.map((q, idx) => {
+            const srcP = buildSourceParagraphXml(q.sourceFileName || q.sourceDocName || 'Unknown');
+            const finalXml = replaceFirstQuestionNumberWithArabic(q.xmlString, start + idx);
+            return srcP + '\n' + finalXml;
+        }).join('\n');
+        const pageBreakXml = buildPageBreakParagraphXml();
+        documentXml = documentXml.substring(0, pStartSearch) + pageBreakXml + '\n' + insertXml + documentXml.substring(pEnd);
+        answersZip.file('word/document.xml', documentXml);
+        const newBlob = await answersZip.generateAsync({
+            type: 'blob',
+            mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            compression: 'DEFLATE'
+        });
+        console.log('[injectFinancialNonMcAnswers] XML 注入完成，共注入 ' + selectedWordQuestions.length + ' 題，起始題號=' + start);
+        return newBlob;
+    } catch (e) {
+        console.error('[injectFinancialNonMcAnswers] 注入失敗:', e);
+        return answersBlobFromDocxJs;
     }
 }
 
@@ -1206,7 +1446,7 @@ class WordGenerator {
         });
     }
 
-    // Managerial 專用：產生封面頁元素（含答案格），傳入題目總數以決定格數
+    // 共用封面版型（Managerial / Financial）
     _buildManagerialCoverPage(questionCount, examName, points) {
         // 安全 fallback：如果沒有傳入 points 或 rows 不存在，使用預設值
         const defaultRows = [
@@ -1254,24 +1494,15 @@ class WordGenerator {
                 spacing: { after: 320 }
             }),
             new docx.Paragraph({
-                children: [new docx.TextRun({
-                    text: '• For open-ended questions, you must show all supporting calculations in an ORGANIZED way to be eligible to receive total credit. If not, you\'ll not get partial credit.',
-                    size: 20
-                })],
+                children: [new docx.TextRun({ text: '• For open-ended questions, you must show all supporting calculations in an ORGANIZED way to be eligible to receive total credit. If not, you\'ll not get partial credit.', size: 20 })],
                 spacing: { after: 120 }
             }),
             new docx.Paragraph({
-                children: [new docx.TextRun({
-                    text: '• For open-ended question, you will receive minimum or zero points if you only show answers without any supporting calculations.',
-                    size: 20
-                })],
+                children: [new docx.TextRun({ text: '• For open-ended question, you will receive minimum or zero points if you only show answers without any supporting calculations.', size: 20 })],
                 spacing: { after: 120 }
             }),
             new docx.Paragraph({
-                children: [new docx.TextRun({
-                    text: '• You must transfer your answers for the multiple choice questions to this coversheet below. If not, you\'ll lose 10 points.',
-                    size: 20
-                })],
+                children: [new docx.TextRun({ text: '• You must transfer your answers for the multiple choice questions to this coversheet below. If not, you\'ll lose 10 points.', size: 20 })],
                 spacing: { after: 240 }
             })
         );
@@ -1511,7 +1742,7 @@ class WordGenerator {
             return out;
         };
 
-        if (currentSubject === 'managerial') {
+        if (currentSubject === 'managerial' || currentSubject === 'financial') {
             allChildren.push(...this._buildManagerialCoverPage(questions.length, examName, points));
         }
         
@@ -1529,54 +1760,6 @@ class WordGenerator {
                 spacing: { after: 400 }
             })
         );
-
-        // 總題數／作答檢查表／勾選格表：僅 Financial 保留；Managerial 已有封面作答格，題目頁不再重複
-        if (currentSubject !== 'managerial') {
-            allChildren.push(
-                new docx.Paragraph({
-                    children: [new docx.TextRun({ text: `總題數：${questions.length} 題` })],
-                    alignment: docx.AlignmentType.CENTER,
-                    spacing: { after: 600 }
-                })
-            );
-            const cols = 5;
-            const rows = Math.ceil(questions.length / cols);
-            const tableRows = [];
-            for (let row = 0; row < rows; row++) {
-                const cells = [];
-                for (let col = 0; col < cols; col++) {
-                    const index = row * cols + col;
-                    if (index < questions.length) {
-                        cells.push(
-                            new docx.TableCell({
-                                children: [
-                                    new docx.Paragraph({
-                                        children: [new docx.TextRun({ text: `${index + 1}`, size: 18 })],
-                                        alignment: docx.AlignmentType.CENTER
-                                    }),
-                                    new docx.Paragraph({
-                                        children: [new docx.TextRun({ text: '⬜', size: 20 })],
-                                        alignment: docx.AlignmentType.CENTER
-                                    })
-                                ],
-                                width: { size: 20, type: docx.WidthType.PERCENTAGE }
-                            })
-                        );
-                    } else {
-                        cells.push(new docx.TableCell({ children: [], width: { size: 20, type: docx.WidthType.PERCENTAGE } }));
-                    }
-                }
-                tableRows.push(new docx.TableRow({ children: cells }));
-            }
-            allChildren.push(
-                new docx.Paragraph({
-                    children: [new docx.TextRun({ text: '作答檢查表', bold: true, size: 24 })],
-                    spacing: { after: 200 }
-                })
-            );
-            allChildren.push(new docx.Table({ rows: tableRows, width: { size: 100, type: docx.WidthType.PERCENTAGE } }));
-            allChildren.push(new docx.Paragraph({ children: [], spacing: { after: 400 } }));
-        }
 
         // 題目內容（移除所有標記和原始 ID）
         questions.forEach((q, index) => {
@@ -1858,8 +2041,22 @@ class WordGenerator {
             });
         }
 
-        // Word 非選擇題區塊（僅 Managerial）：不輸出標題，只保留 marker 段落供 inject 插入
-        if (currentSubject === 'managerial' && wordNonMcSelected && wordNonMcSelected.length > 0) {
+        // Word / Financial Non-MC 區塊插入點
+        if (wordNonMcSelected && wordNonMcSelected.length > 0) {
+            if (currentSubject === 'financial') {
+                allChildren.push(
+                    new docx.Paragraph({
+                        children: [
+                            new docx.TextRun({
+                                text: 'II. PROBLEMS',
+                                bold: true,
+                                size: 22
+                            })
+                        ],
+                        spacing: { before: 400, after: 200 }
+                    })
+                );
+            }
             allChildren.push(
                 new docx.Paragraph({
                     children: [
@@ -2535,6 +2732,11 @@ function applySubjectUI(prevSubject) {
             examNameBuilder.style.display = 'none';
         }
         if (wordUploadSection) wordUploadSection.style.display = 'none';
+
+        // Financial 仍使用正式 coversheet，保留 points 設定 UI 可編輯
+        if (pointsConfig) pointsConfig.style.display = '';
+        if (addPointsRowBtn) addPointsRowBtn.style.display = '';
+        if (pointsTotalDisplay) pointsTotalDisplay.style.display = '';
         
         // Financial Accounting 的既有邏輯
         const currentVal = (examNameInput.value || '').trim();
@@ -3106,9 +3308,9 @@ generateBtn.addEventListener('click', async () => {
             }
         }
 
-        // Word 非選擇題抽題（僅 Managerial）：每檔各自抽 requestedCount，合併後再 shuffle
+        // Word / Financial Non-MC 抽題：每檔各自抽 requestedCount，合併後再 shuffle
         let wordNonMcSelected = [];
-        if (currentSubject === 'managerial' && wordParseState === 'parsed' && wordDocs.length > 0) {
+        if (wordParseState === 'parsed' && wordDocs.length > 0) {
             const wordNonMcSelectedByDoc = [];
             for (let i = 0; i < wordDocs.length; i++) {
                 const req = wordDocs[i].requestedCount || 0;
@@ -3123,8 +3325,8 @@ generateBtn.addEventListener('click', async () => {
             }
         }
 
-        // 讀取 Exam Points（僅 Managerial Accounting 需要）
-        const examPoints = (currentSubject === 'managerial') ? readExamPointsFromUI() : null;
+        // 讀取 Exam Points（Managerial / Financial 皆使用正式 cover page）
+        const examPoints = readExamPointsFromUI();
         
         // 生成 Word 文檔
         const wordGen = new WordGenerator();
@@ -3132,14 +3334,22 @@ generateBtn.addEventListener('click', async () => {
         console.log('Generating Questions doc...');
         let questionBlob = await wordGen.generateQuestionSheet(examName, examQuestions, examPoints, exSelectedAll, wordNonMcSelected);
         if (wordNonMcSelected.length > 0) {
-            questionBlob = await injectNonMcIntoQuestionsDocx(questionBlob, wordNonMcSelected, wordDocxZip);
+            if (currentSubject === 'financial') {
+                questionBlob = await injectFinancialNonMcIntoQuestionsDocx(questionBlob, wordNonMcSelected, examQuestions.length);
+            } else {
+                questionBlob = await injectNonMcIntoQuestionsDocx(questionBlob, wordNonMcSelected, wordDocxZip);
+            }
         }
         console.log('Questions doc generated');
         
         console.log('Generating Answers doc...');
         let answerBlob = await wordGen.generateAnswerSheet(examName, examQuestions, exSelectedAll, wordNonMcSelected);
         if (wordNonMcSelected.length > 0) {
-            answerBlob = await injectNonMcIntoAnswersDocx(answerBlob, wordNonMcSelected, wordDocxZip);
+            if (currentSubject === 'financial') {
+                answerBlob = await injectFinancialNonMcIntoAnswersDocx(answerBlob, wordNonMcSelected, examQuestions.length);
+            } else {
+                answerBlob = await injectNonMcIntoAnswersDocx(answerBlob, wordNonMcSelected, wordDocxZip);
+            }
         }
         console.log('Answers doc generated');
         
