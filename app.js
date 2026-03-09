@@ -17,7 +17,7 @@ const SUBJECT_CONFIG = {
         // parserRules: 暫時指向同一套（先一樣）
     }
 };
-let currentSubject = 'managerial';
+let currentSubject = 'financial';
 
 // Managerial Accounting Exam Name Builder 設定
 const MANAGERIAL_EXAMNAME_PREFIX = "ACCT 310 Intermediate Accounting I";
