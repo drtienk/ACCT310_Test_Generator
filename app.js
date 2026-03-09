@@ -1673,6 +1673,209 @@ class WordGenerator {
         return out;
     }
 
+    // Financial 題目卷專用封面（僅 Questions.docx）
+    _buildFinancialCoverPage(questionCount, examName, points) {
+        const defaultRows = [
+            { label: "I", value: 150 },
+            { label: "II", value: 25 },
+            { label: "III", value: 25 }
+        ];
+        const defaultTotal = 200;
+        const ptsRows = (points && points.rows && Array.isArray(points.rows) && points.rows.length > 0)
+            ? points.rows
+            : defaultRows;
+        const ptsTotal = (points && points.total !== undefined && points.total !== null)
+            ? points.total
+            : defaultTotal;
+
+        const COVER_POINTS_ROW_HEIGHT = 500;
+        const ANSWER_GRID_ROW_HEIGHT = 550;
+        const cols = 10;
+        const blockCount = Math.max(1, Math.ceil(questionCount / cols));
+        const coverGridFontSize = 26;
+        const borderOption = (typeof docx.BorderStyle !== 'undefined')
+            ? { style: docx.BorderStyle.SINGLE, size: 4 }
+            : { size: 4 };
+
+        const out = [];
+        out.push(
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: 'Department of Accounting and ISA', size: 22 })],
+                alignment: docx.AlignmentType.CENTER,
+                spacing: { after: 80 }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: 'Shippensburg University', size: 22 })],
+                alignment: docx.AlignmentType.CENTER,
+                spacing: { after: 80 }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: examName || 'Financial Accounting', size: 22 })],
+                alignment: docx.AlignmentType.CENTER,
+                spacing: { after: 320 }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: 'Section: __________     Name: __________________________', size: 22 })],
+                spacing: { after: 320 }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: '• For open-ended questions, you must show all supporting calculations in an ORGANIZED way to be eligible to receive total credit. If not, you\'ll not get partial credit.', size: 20 })],
+                spacing: { after: 120 }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: '• For open-ended question, you will receive minimum or zero points if you only show answers without any supporting calculations.', size: 20 })],
+                spacing: { after: 120 }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: '• You must transfer your answers for the multiple choice questions to this coversheet below. If not, you\'ll lose 10 points.', size: 20 })],
+                spacing: { after: 240 }
+            })
+        );
+
+        const pointsTableRows = [
+            new docx.TableRow({
+                height: { value: COVER_POINTS_ROW_HEIGHT, rule: docx.HeightRule.EXACT },
+                children: [
+                    this._buildCoverTableCell('Parts', true),
+                    this._buildCoverTableCell('Points', true),
+                    this._buildCoverTableCell('Score', true)
+                ]
+            })
+        ];
+
+        ptsRows.forEach((row, index) => {
+            const partLabel = this.toRoman(index + 1) + '.';
+            const value = (row && row.value !== undefined && row.value !== null) ? row.value : 0;
+            pointsTableRows.push(
+                new docx.TableRow({
+                    height: { value: COVER_POINTS_ROW_HEIGHT, rule: docx.HeightRule.EXACT },
+                    children: [
+                        this._buildCoverTableCell(partLabel),
+                        this._buildCoverTableCell(String(value)),
+                        this._buildCoverEmptyCell()
+                    ]
+                })
+            );
+        });
+
+        pointsTableRows.push(
+            new docx.TableRow({
+                height: { value: COVER_POINTS_ROW_HEIGHT, rule: docx.HeightRule.EXACT },
+                children: [
+                    this._buildCoverTableCell('Total Points'),
+                    this._buildCoverTableCell(String(ptsTotal)),
+                    this._buildCoverEmptyCell()
+                ]
+            })
+        );
+
+        out.push(
+            new docx.Table({
+                rows: pointsTableRows,
+                width: { size: 40, type: docx.WidthType.PERCENTAGE }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({
+                    text: 'An important aspect of being a professional is that of honor and professional conduct.',
+                    size: 20
+                })],
+                spacing: { before: 280, after: 120 }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({
+                    text: 'I pledge that I have neither given nor received aid in the completion of this examination.',
+                    size: 20
+                })],
+                spacing: { after: 120 }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: '____________________________________________  LEGIBLE SIGNATURE', size: 20 })],
+                spacing: { after: 320 }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: 'I. MULTIPLE CHOICE', bold: true, size: 22 })],
+                spacing: { after: 120 }
+            }),
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: 'Write the letter that best answers each question.', size: 20 })],
+                spacing: { after: 200 }
+            })
+        );
+
+        const gridRows = [];
+        for (let b = 0; b < blockCount; b++) {
+            const qCells = [new docx.TableCell({
+                verticalAlignment: docx.VerticalAlign.CENTER,
+                children: [new docx.Paragraph({
+                    alignment: docx.AlignmentType.CENTER,
+                    children: [new docx.TextRun({ text: 'Q.', size: coverGridFontSize, bold: true })]
+                })],
+                width: { size: 8, type: docx.WidthType.PERCENTAGE }
+            })];
+            const aCells = [new docx.TableCell({
+                verticalAlignment: docx.VerticalAlign.CENTER,
+                children: [new docx.Paragraph({
+                    alignment: docx.AlignmentType.CENTER,
+                    children: [new docx.TextRun({ text: 'A.', size: coverGridFontSize })]
+                })],
+                width: { size: 8, type: docx.WidthType.PERCENTAGE }
+            })];
+
+            for (let c = 0; c < cols; c++) {
+                const num = b * cols + c + 1;
+                qCells.push(new docx.TableCell({
+                    verticalAlignment: docx.VerticalAlign.CENTER,
+                    children: [new docx.Paragraph({
+                        alignment: docx.AlignmentType.CENTER,
+                        children: [new docx.TextRun({
+                            text: num <= questionCount ? String(num) : '',
+                            size: coverGridFontSize,
+                            bold: true
+                        })]
+                    })],
+                    width: { size: (92 / cols), type: docx.WidthType.PERCENTAGE }
+                }));
+                aCells.push(new docx.TableCell({
+                    verticalAlignment: docx.VerticalAlign.CENTER,
+                    children: [new docx.Paragraph({
+                        alignment: docx.AlignmentType.CENTER,
+                        children: []
+                    })],
+                    width: { size: (92 / cols), type: docx.WidthType.PERCENTAGE }
+                }));
+            }
+
+            gridRows.push(
+                new docx.TableRow({
+                    height: { value: ANSWER_GRID_ROW_HEIGHT, rule: docx.HeightRule.EXACT },
+                    children: qCells
+                }),
+                new docx.TableRow({
+                    height: { value: ANSWER_GRID_ROW_HEIGHT, rule: docx.HeightRule.EXACT },
+                    children: aCells
+                })
+            );
+        }
+
+        out.push(
+            new docx.Table({
+                rows: gridRows,
+                width: { size: 100, type: docx.WidthType.PERCENTAGE },
+                borders: {
+                    top: borderOption,
+                    bottom: borderOption,
+                    left: borderOption,
+                    right: borderOption,
+                    insideHorizontal: borderOption,
+                    insideVertical: borderOption
+                }
+            })
+        );
+
+        out.push(new docx.Paragraph({ children: [new docx.PageBreak()], spacing: { after: 0 } }));
+        return out;
+    }
+
     // Answer Sheet 專用：由左到右、每列 perRow 題的答案摘要格（與題目卷答案格同版型）
     _buildHorizontalAnswerGrid(questions, perRow) {
         perRow = perRow || 10;
@@ -1742,24 +1945,28 @@ class WordGenerator {
             return out;
         };
 
-        if (currentSubject === 'managerial' || currentSubject === 'financial') {
+        if (currentSubject === 'managerial') {
             allChildren.push(...this._buildManagerialCoverPage(questions.length, examName, points));
+        } else if (currentSubject === 'financial') {
+            allChildren.push(...this._buildFinancialCoverPage(questions.length, examName, points));
         }
         
-        // 1. 標題
-        allChildren.push(
-            new docx.Paragraph({
-                children: [
-                    new docx.TextRun({
-                        text: examName,
-                        bold: true,
-                        size: 32
-                    })
-                ],
-                alignment: docx.AlignmentType.CENTER,
-                spacing: { after: 400 }
-            })
-        );
+        // 1. 標題（Financial 已在專用 cover sheet 顯示，不重複）
+        if (currentSubject !== 'financial') {
+            allChildren.push(
+                new docx.Paragraph({
+                    children: [
+                        new docx.TextRun({
+                            text: examName,
+                            bold: true,
+                            size: 32
+                        })
+                    ],
+                    alignment: docx.AlignmentType.CENTER,
+                    spacing: { after: 400 }
+                })
+            );
+        }
 
         // 題目內容（移除所有標記和原始 ID）
         questions.forEach((q, index) => {
