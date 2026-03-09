@@ -1744,7 +1744,7 @@ class WordGenerator {
         ];
 
         ptsRows.forEach((row, index) => {
-            const partLabel = this.toRoman(index + 1) + '.';
+            const partLabel = toRoman(index + 1) + '.';
             const value = (row && row.value !== undefined && row.value !== null) ? row.value : 0;
             pointsTableRows.push(
                 new docx.TableRow({
