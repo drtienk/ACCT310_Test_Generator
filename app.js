@@ -1467,9 +1467,9 @@ class WordGenerator {
         const showPointsTable = !isFinancialCover;
         const introInstructions = isFinancialCover
             ? [
-                '• Please write your answers clearly and legibly.',
-                '• Transfer your multiple choice answers to the answer grid on this coversheet.',
-                '• Choose the best answer for each question.'
+                '• For open-ended questions, you must show all supporting calculations in an ORGANIZED way to be eligible to receive total credit. If not, you'll not get partial credit.',
+                '• For open-ended question, you will receive minimum or zero points if you only show answers without any supporting calculations.',
+                '• You must transfer your answers for the multiple choice questions to this coversheet below. If not, you'll lose 10 points.'
             ]
             : [
                 '• For open-ended questions, you must show all supporting calculations in an ORGANIZED way to be eligible to receive total credit. If not, you\'ll not get partial credit.',
