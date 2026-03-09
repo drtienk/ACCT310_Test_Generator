@@ -13,7 +13,7 @@ const SUBJECT_CONFIG = {
     financial: {
         label: 'Financial Accounting',
         pageTitle: 'Financial Accounting Test Generator',
-        defaultExamName: 'Financial Accounting',
+        defaultExamName: 'ACCT310 Intermediate Accounting I',
         // parserRules: 暫時指向同一套（先一樣）
     }
 };
