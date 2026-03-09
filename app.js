@@ -177,6 +177,7 @@ class PDFParser {
     async parseFinancialByPage(pdfDoc, fileMeta) {
         const questions = [];
         const fileBaseName = (fileMeta && fileMeta.name ? fileMeta.name : 'FA').replace(/\.pdf$/i, '');
+        const pageDiagnostics = [];
 
         console.log('[Financial] 開始解析: ' + fileBaseName + ', 共 ' + pdfDoc.numPages + ' 頁');
 
@@ -185,48 +186,113 @@ class PDFParser {
                 const page = await pdfDoc.getPage(pageNum);
                 const textContent = await page.getTextContent();
                 const rawLines = this.reconstructLines(textContent.items);
-                const lines = rawLines.map(function(l) { return (l || '').trim(); }).filter(function(l) { return l.length > 0; });
+                const lines = this.normalizeFinancialLines(rawLines);
 
                 const q = this.parseFinancialOnePage(lines, pageNum, fileBaseName);
 
                 if (q) {
                     questions.push(q);
+                    pageDiagnostics.push({ page: pageNum, ok: true, reason: 'parsed' });
                     console.log('[Financial][' + fileBaseName + '][p' + pageNum + '] ✓ opts=' + q.options.length + ', answer=' + q.correctOption);
                 } else {
+                    pageDiagnostics.push({ page: pageNum, ok: false, reason: 'no-question' });
                     console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] ✗ 未解析出題目');
                 }
             } catch (e) {
+                pageDiagnostics.push({ page: pageNum, ok: false, reason: 'exception: ' + e.message });
                 console.error('[Financial][' + fileBaseName + '][p' + pageNum + '] 異常:', e.message);
             }
+        }
+
+        const failedCount = pageDiagnostics.filter(function(d) { return !d.ok; }).length;
+        if (failedCount > 0) {
+            console.warn('[Financial][' + fileBaseName + '] 解析摘要: success=' + (pageDiagnostics.length - failedCount) + ', failed=' + failedCount);
         }
 
         console.log('[Financial] ' + fileBaseName + ': 總共 ' + questions.length + ' 題');
         return questions;
     }
 
+    normalizeFinancialLines(rawLines) {
+        return (rawLines || [])
+            .map(function(l) { return String(l == null ? '' : l).replace(/\s+/g, ' ').trim(); })
+            .filter(function(l) { return l.length > 0; });
+    }
+
+    removeFinancialNoiseLines(lines) {
+        const noisePatterns = [
+            /^revision\s*:/i,
+            /^page\s*\d+/i,
+            /^assignment\s+print\s+view/i,
+            /^question\s+help/i,
+            /^attempt\s+history/i,
+            /^show\s+all\s+feedback/i,
+            /^hide\s+all\s+feedback/i,
+            /^score\s*:/i,
+            /^time\s+elapsed\s*:/i
+        ];
+
+        return (lines || []).filter(function(line) {
+            for (var i = 0; i < noisePatterns.length; i++) {
+                if (noisePatterns[i].test(line)) return false;
+            }
+            return true;
+        });
+    }
+
+    findFinancialStartIndex(lines) {
+        var awardPattern = /^\d+\.\s*Award:\s*\d+(\.\d+)?\s*point(s)?/i;
+        for (var i = 0; i < lines.length; i++) {
+            if (awardPattern.test(lines[i])) return i;
+        }
+        return -1;
+    }
+
+    getFinancialQuestionId(awardLine, pageNum, fileBaseName) {
+        var m = String(awardLine || '').match(/^(\d+)\./);
+        if (m) return fileBaseName + '-q' + m[1] + '-p' + pageNum;
+        return fileBaseName + '-p' + pageNum;
+    }
+
+    detectFinancialCorrectOptionFromText(lines, optionCount) {
+        if (!lines || optionCount < 1) return -1;
+        const text = lines.join(' ').toLowerCase();
+        var m = text.match(/(?:correct\s+answer|answer|solution)\s*[:\-]?\s*([a-e])/i);
+        if (m) {
+            const idx = m[1].toLowerCase().charCodeAt(0) - 97;
+            if (idx >= 0 && idx < optionCount) return idx;
+        }
+        return -1;
+    }
+
+    cleanFinancialFeedbackLine(line) {
+        let out = String(line == null ? '' : line).trim();
+        out = out.replace(/^feedback\s*[:：]?\s*/i, '').trim();
+        out = out.replace(/^explanation\s*[:：]?\s*/i, '').trim();
+        out = out.replace(/^solution\s*[:：]?\s*/i, '').trim();
+        return out;
+    }
+
     parseFinancialOnePage(lines, pageNum, fileBaseName) {
         var CIRCLE = '\uEA56';
         var ARROW = '\uEA57';
 
-        var awardPattern = /^\d+\.\s*Award:\s*\d+(\.\d+)?\s*point(s)?/i;
-        var awardIdx = -1;
-        for (var i = 0; i < lines.length; i++) {
-            if (awardPattern.test(lines[i])) {
-                awardIdx = i;
-                break;
-            }
-        }
+        var normalizedLines = this.normalizeFinancialLines(lines);
+        var cleanedLines = this.removeFinancialNoiseLines(normalizedLines);
+        var awardIdx = this.findFinancialStartIndex(cleanedLines);
 
         if (awardIdx < 0) {
             console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 未找到 Award 行');
             return null;
         }
 
-        var content = lines.slice(awardIdx + 1);
+        var awardLine = cleanedLines[awardIdx] || '';
+        var questionId = this.getFinancialQuestionId(awardLine, pageNum, fileBaseName);
+        var content = cleanedLines.slice(awardIdx + 1);
 
         var endIdx = content.length;
         for (var i = 0; i < content.length; i++) {
-            if (/^References$/i.test(content[i]) || /^Multiple Choice/i.test(content[i])) {
+            if (/^References$/i.test(content[i]) || /^Multiple Choice/i.test(content[i]) || /^Question\s+\d+/i.test(content[i])) {
                 endIdx = i;
                 break;
             }
@@ -237,27 +303,40 @@ class PDFParser {
         var questionLines = [];
         var optionLines = [];
         var foundFirstOption = false;
+        var currentOptionLine = null;
 
         for (var i = 0; i < questionContent.length; i++) {
             var line = questionContent[i];
-            if (line.indexOf(CIRCLE) !== -1) {
+            var hasCircle = line.indexOf(CIRCLE) !== -1;
+            var hasArrow = line.indexOf(ARROW) !== -1;
+            if (hasCircle || (hasArrow && foundFirstOption)) {
                 foundFirstOption = true;
-                if (optionLines.length < 4) {
-                    optionLines.push(line);
+                if (currentOptionLine != null) {
+                    optionLines.push(currentOptionLine.trim());
                 }
+                currentOptionLine = line;
             } else if (!foundFirstOption) {
                 questionLines.push(line);
+            } else {
+                if (currentOptionLine != null) {
+                    currentOptionLine += ' ' + line;
+                }
             }
+        }
+        if (currentOptionLine != null) {
+            optionLines.push(currentOptionLine.trim());
         }
 
         var options = [];
         var answerIndex = -1;
+        var answerDetectedByArrow = false;
 
         for (var i = 0; i < optionLines.length; i++) {
             var optText = optionLines[i];
 
             if (optText.indexOf(ARROW) !== -1) {
                 answerIndex = i;
+                answerDetectedByArrow = true;
             }
 
             optText = optText.split(CIRCLE).join('');
@@ -268,14 +347,44 @@ class PDFParser {
             options.push(letter + '. ' + optText);
         }
 
-        if (options.length < 3) {
+        if (options.length < 2) {
+            // fallback: 嘗試從 a./b./c. 標記拆出選項
+            var combinedText = questionContent.join(' ');
+            var fallbackOptions = [];
+            var letterPattern = /(?:^|\s)([a-e])\.\s*/ig;
+            var matches = [];
+            var m;
+            while ((m = letterPattern.exec(combinedText)) !== null) {
+                matches.push({ idx: m.index, letter: m[1].toLowerCase() });
+            }
+            for (var j = 0; j < matches.length; j++) {
+                var start = matches[j].idx;
+                var end = (j + 1 < matches.length) ? matches[j + 1].idx : combinedText.length;
+                var slice = combinedText.substring(start, end).trim();
+                var normalized = slice.replace(/^([a-e])\.\s*/i, '$1. ').replace(/\s+/g, ' ').trim();
+                if (normalized) fallbackOptions.push(normalized);
+            }
+            if (fallbackOptions.length >= 2) {
+                options = fallbackOptions;
+            }
+        }
+
+        if (options.length < 2) {
             console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 選項不足: ' + options.length);
             return null;
         }
 
         if (answerIndex < 0) {
-            console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 未找到正確答案標記（箭頭）');
-            return null;
+            answerIndex = this.detectFinancialCorrectOptionFromText(questionContent, options.length);
+            if (answerIndex >= 0) {
+                console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 箭頭缺失，改用文字 fallback 辨識答案');
+            }
+        }
+
+        if (answerIndex < 0) {
+            // 最後保底：保留題目但標記為 a，避免整頁掉題
+            answerIndex = 0;
+            console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 未找到答案標記，使用保底答案 a');
         }
 
         var lastOptionIdx = -1;
@@ -289,8 +398,14 @@ class PDFParser {
         if (lastOptionIdx >= 0) {
             for (var i = lastOptionIdx + 1; i < questionContent.length; i++) {
                 var line = questionContent[i].trim();
-                if (line && line.indexOf(CIRCLE) === -1 && line.indexOf(ARROW) === -1) {
-                    feedbackLines.push(line);
+                if (!line) continue;
+                if (line.indexOf(CIRCLE) !== -1 || line.indexOf(ARROW) !== -1) continue;
+                if (/^(References|Multiple Choice)$/i.test(line)) continue;
+                if (/^revision\s*:/i.test(line)) continue;
+                if (/^Question\s+\d+/i.test(line)) continue;
+                var cleaned = this.cleanFinancialFeedbackLine(line);
+                if (cleaned) {
+                    feedbackLines.push(cleaned);
                 }
             }
         }
@@ -306,11 +421,11 @@ class PDFParser {
         var correctLetter = String.fromCharCode(97 + answerIndex);
 
         return {
-            originalId: fileBaseName + '-p' + pageNum,
+            originalId: questionId,
             questionText: questionText,
             options: options,
             correctOption: correctLetter,
-            hasCheckmark: true,
+            hasCheckmark: answerDetectedByArrow,
             feedbackText: feedbackText
         };
     }
