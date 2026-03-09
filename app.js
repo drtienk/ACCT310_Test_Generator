@@ -177,7 +177,6 @@ class PDFParser {
     async parseFinancialByPage(pdfDoc, fileMeta) {
         const questions = [];
         const fileBaseName = (fileMeta && fileMeta.name ? fileMeta.name : 'FA').replace(/\.pdf$/i, '');
-        const pageDiagnostics = [];
 
         console.log('[Financial] 開始解析: ' + fileBaseName + ', 共 ' + pdfDoc.numPages + ' 頁');
 
@@ -186,113 +185,48 @@ class PDFParser {
                 const page = await pdfDoc.getPage(pageNum);
                 const textContent = await page.getTextContent();
                 const rawLines = this.reconstructLines(textContent.items);
-                const lines = this.normalizeFinancialLines(rawLines);
+                const lines = rawLines.map(function(l) { return (l || '').trim(); }).filter(function(l) { return l.length > 0; });
 
                 const q = this.parseFinancialOnePage(lines, pageNum, fileBaseName);
 
                 if (q) {
                     questions.push(q);
-                    pageDiagnostics.push({ page: pageNum, ok: true, reason: 'parsed' });
                     console.log('[Financial][' + fileBaseName + '][p' + pageNum + '] ✓ opts=' + q.options.length + ', answer=' + q.correctOption);
                 } else {
-                    pageDiagnostics.push({ page: pageNum, ok: false, reason: 'no-question' });
                     console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] ✗ 未解析出題目');
                 }
             } catch (e) {
-                pageDiagnostics.push({ page: pageNum, ok: false, reason: 'exception: ' + e.message });
                 console.error('[Financial][' + fileBaseName + '][p' + pageNum + '] 異常:', e.message);
             }
-        }
-
-        const failedCount = pageDiagnostics.filter(function(d) { return !d.ok; }).length;
-        if (failedCount > 0) {
-            console.warn('[Financial][' + fileBaseName + '] 解析摘要: success=' + (pageDiagnostics.length - failedCount) + ', failed=' + failedCount);
         }
 
         console.log('[Financial] ' + fileBaseName + ': 總共 ' + questions.length + ' 題');
         return questions;
     }
 
-    normalizeFinancialLines(rawLines) {
-        return (rawLines || [])
-            .map(function(l) { return String(l == null ? '' : l).replace(/\s+/g, ' ').trim(); })
-            .filter(function(l) { return l.length > 0; });
-    }
-
-    removeFinancialNoiseLines(lines) {
-        const noisePatterns = [
-            /^revision\s*:/i,
-            /^page\s*\d+/i,
-            /^assignment\s+print\s+view/i,
-            /^question\s+help/i,
-            /^attempt\s+history/i,
-            /^show\s+all\s+feedback/i,
-            /^hide\s+all\s+feedback/i,
-            /^score\s*:/i,
-            /^time\s+elapsed\s*:/i
-        ];
-
-        return (lines || []).filter(function(line) {
-            for (var i = 0; i < noisePatterns.length; i++) {
-                if (noisePatterns[i].test(line)) return false;
-            }
-            return true;
-        });
-    }
-
-    findFinancialStartIndex(lines) {
-        var awardPattern = /^\d+\.\s*Award:\s*\d+(\.\d+)?\s*point(s)?/i;
-        for (var i = 0; i < lines.length; i++) {
-            if (awardPattern.test(lines[i])) return i;
-        }
-        return -1;
-    }
-
-    getFinancialQuestionId(awardLine, pageNum, fileBaseName) {
-        var m = String(awardLine || '').match(/^(\d+)\./);
-        if (m) return fileBaseName + '-q' + m[1] + '-p' + pageNum;
-        return fileBaseName + '-p' + pageNum;
-    }
-
-    detectFinancialCorrectOptionFromText(lines, optionCount) {
-        if (!lines || optionCount < 1) return -1;
-        const text = lines.join(' ').toLowerCase();
-        var m = text.match(/(?:correct\s+answer|answer|solution)\s*[:\-]?\s*([a-e])/i);
-        if (m) {
-            const idx = m[1].toLowerCase().charCodeAt(0) - 97;
-            if (idx >= 0 && idx < optionCount) return idx;
-        }
-        return -1;
-    }
-
-    cleanFinancialFeedbackLine(line) {
-        let out = String(line == null ? '' : line).trim();
-        out = out.replace(/^feedback\s*[:：]?\s*/i, '').trim();
-        out = out.replace(/^explanation\s*[:：]?\s*/i, '').trim();
-        out = out.replace(/^solution\s*[:：]?\s*/i, '').trim();
-        return out;
-    }
-
     parseFinancialOnePage(lines, pageNum, fileBaseName) {
         var CIRCLE = '\uEA56';
         var ARROW = '\uEA57';
 
-        var normalizedLines = this.normalizeFinancialLines(lines);
-        var cleanedLines = this.removeFinancialNoiseLines(normalizedLines);
-        var awardIdx = this.findFinancialStartIndex(cleanedLines);
+        var awardPattern = /^\d+\.\s*Award:\s*\d+(\.\d+)?\s*point(s)?/i;
+        var awardIdx = -1;
+        for (var i = 0; i < lines.length; i++) {
+            if (awardPattern.test(lines[i])) {
+                awardIdx = i;
+                break;
+            }
+        }
 
         if (awardIdx < 0) {
             console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 未找到 Award 行');
             return null;
         }
 
-        var awardLine = cleanedLines[awardIdx] || '';
-        var questionId = this.getFinancialQuestionId(awardLine, pageNum, fileBaseName);
-        var content = cleanedLines.slice(awardIdx + 1);
+        var content = lines.slice(awardIdx + 1);
 
         var endIdx = content.length;
         for (var i = 0; i < content.length; i++) {
-            if (/^References$/i.test(content[i]) || /^Multiple Choice/i.test(content[i]) || /^Question\s+\d+/i.test(content[i])) {
+            if (/^References$/i.test(content[i]) || /^Multiple Choice/i.test(content[i])) {
                 endIdx = i;
                 break;
             }
@@ -303,40 +237,27 @@ class PDFParser {
         var questionLines = [];
         var optionLines = [];
         var foundFirstOption = false;
-        var currentOptionLine = null;
 
         for (var i = 0; i < questionContent.length; i++) {
             var line = questionContent[i];
-            var hasCircle = line.indexOf(CIRCLE) !== -1;
-            var hasArrow = line.indexOf(ARROW) !== -1;
-            if (hasCircle || (hasArrow && foundFirstOption)) {
+            if (line.indexOf(CIRCLE) !== -1) {
                 foundFirstOption = true;
-                if (currentOptionLine != null) {
-                    optionLines.push(currentOptionLine.trim());
+                if (optionLines.length < 4) {
+                    optionLines.push(line);
                 }
-                currentOptionLine = line;
             } else if (!foundFirstOption) {
                 questionLines.push(line);
-            } else {
-                if (currentOptionLine != null) {
-                    currentOptionLine += ' ' + line;
-                }
             }
-        }
-        if (currentOptionLine != null) {
-            optionLines.push(currentOptionLine.trim());
         }
 
         var options = [];
         var answerIndex = -1;
-        var answerDetectedByArrow = false;
 
         for (var i = 0; i < optionLines.length; i++) {
             var optText = optionLines[i];
 
             if (optText.indexOf(ARROW) !== -1) {
                 answerIndex = i;
-                answerDetectedByArrow = true;
             }
 
             optText = optText.split(CIRCLE).join('');
@@ -347,44 +268,14 @@ class PDFParser {
             options.push(letter + '. ' + optText);
         }
 
-        if (options.length < 2) {
-            // fallback: 嘗試從 a./b./c. 標記拆出選項
-            var combinedText = questionContent.join(' ');
-            var fallbackOptions = [];
-            var letterPattern = /(?:^|\s)([a-e])\.\s*/ig;
-            var matches = [];
-            var m;
-            while ((m = letterPattern.exec(combinedText)) !== null) {
-                matches.push({ idx: m.index, letter: m[1].toLowerCase() });
-            }
-            for (var j = 0; j < matches.length; j++) {
-                var start = matches[j].idx;
-                var end = (j + 1 < matches.length) ? matches[j + 1].idx : combinedText.length;
-                var slice = combinedText.substring(start, end).trim();
-                var normalized = slice.replace(/^([a-e])\.\s*/i, '$1. ').replace(/\s+/g, ' ').trim();
-                if (normalized) fallbackOptions.push(normalized);
-            }
-            if (fallbackOptions.length >= 2) {
-                options = fallbackOptions;
-            }
-        }
-
-        if (options.length < 2) {
+        if (options.length < 3) {
             console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 選項不足: ' + options.length);
             return null;
         }
 
         if (answerIndex < 0) {
-            answerIndex = this.detectFinancialCorrectOptionFromText(questionContent, options.length);
-            if (answerIndex >= 0) {
-                console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 箭頭缺失，改用文字 fallback 辨識答案');
-            }
-        }
-
-        if (answerIndex < 0) {
-            // 最後保底：保留題目但標記為 a，避免整頁掉題
-            answerIndex = 0;
-            console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 未找到答案標記，使用保底答案 a');
+            console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 未找到正確答案標記（箭頭）');
+            return null;
         }
 
         var lastOptionIdx = -1;
@@ -398,14 +289,8 @@ class PDFParser {
         if (lastOptionIdx >= 0) {
             for (var i = lastOptionIdx + 1; i < questionContent.length; i++) {
                 var line = questionContent[i].trim();
-                if (!line) continue;
-                if (line.indexOf(CIRCLE) !== -1 || line.indexOf(ARROW) !== -1) continue;
-                if (/^(References|Multiple Choice)$/i.test(line)) continue;
-                if (/^revision\s*:/i.test(line)) continue;
-                if (/^Question\s+\d+/i.test(line)) continue;
-                var cleaned = this.cleanFinancialFeedbackLine(line);
-                if (cleaned) {
-                    feedbackLines.push(cleaned);
+                if (line && line.indexOf(CIRCLE) === -1 && line.indexOf(ARROW) === -1) {
+                    feedbackLines.push(line);
                 }
             }
         }
@@ -421,11 +306,11 @@ class PDFParser {
         var correctLetter = String.fromCharCode(97 + answerIndex);
 
         return {
-            originalId: questionId,
+            originalId: fileBaseName + '-p' + pageNum,
             questionText: questionText,
             options: options,
             correctOption: correctLetter,
-            hasCheckmark: answerDetectedByArrow,
+            hasCheckmark: true,
             feedbackText: feedbackText
         };
     }
@@ -1321,8 +1206,8 @@ class WordGenerator {
         });
     }
 
-    // 共用封面版型（Managerial / Financial），以 coverOptions 控制差異
-    _buildManagerialCoverPage(questionCount, examName, points, coverOptions = {}) {
+    // Managerial 專用：產生封面頁元素（含答案格），傳入題目總數以決定格數
+    _buildManagerialCoverPage(questionCount, examName, points) {
         // 安全 fallback：如果沒有傳入 points 或 rows 不存在，使用預設值
         const defaultRows = [
             { label: "I", value: 150 },
@@ -1338,19 +1223,6 @@ class WordGenerator {
         const ptsTotal = (points && points.total !== undefined && points.total !== null) 
             ? points.total 
             : defaultTotal;
-        const isFinancialCover = coverOptions && coverOptions.mode === 'financial';
-        const showPointsTable = !isFinancialCover;
-        const introInstructions = isFinancialCover
-            ? [
-                '• Please write your answers clearly and legibly.',
-                '• Transfer your multiple choice answers to the answer grid on this coversheet.',
-                '• Choose the best answer for each question.'
-            ]
-            : [
-                '• For open-ended questions, you must show all supporting calculations in an ORGANIZED way to be eligible to receive total credit. If not, you\'ll not get partial credit.',
-                '• For open-ended question, you will receive minimum or zero points if you only show answers without any supporting calculations.',
-                '• You must transfer your answers for the multiple choice questions to this coversheet below. If not, you\'ll lose 10 points.'
-            ];
         
         // 封面頁表格行高設定（單位：twips，1 twip = 1/20 point）
         const COVER_POINTS_ROW_HEIGHT = 500; // Points 表格行高（約 25 points，明顯變高方便手寫）
@@ -1382,15 +1254,24 @@ class WordGenerator {
                 spacing: { after: 320 }
             }),
             new docx.Paragraph({
-                children: [new docx.TextRun({ text: introInstructions[0], size: 20 })],
+                children: [new docx.TextRun({
+                    text: '• For open-ended questions, you must show all supporting calculations in an ORGANIZED way to be eligible to receive total credit. If not, you\'ll not get partial credit.',
+                    size: 20
+                })],
                 spacing: { after: 120 }
             }),
             new docx.Paragraph({
-                children: [new docx.TextRun({ text: introInstructions[1], size: 20 })],
+                children: [new docx.TextRun({
+                    text: '• For open-ended question, you will receive minimum or zero points if you only show answers without any supporting calculations.',
+                    size: 20
+                })],
                 spacing: { after: 120 }
             }),
             new docx.Paragraph({
-                children: [new docx.TextRun({ text: introInstructions[2], size: 20 })],
+                children: [new docx.TextRun({
+                    text: '• You must transfer your answers for the multiple choice questions to this coversheet below. If not, you\'ll lose 10 points.',
+                    size: 20
+                })],
                 spacing: { after: 240 }
             })
         );
@@ -1435,14 +1316,12 @@ class WordGenerator {
                 ] 
             })
         );
-        if (showPointsTable) {
-            out.push(
-                new docx.Table({
-                    rows: pointsTableRows,
-                    width: { size: 40, type: docx.WidthType.PERCENTAGE }
-                })
-            );
-        }
+        out.push(
+            new docx.Table({
+                rows: pointsTableRows,
+                width: { size: 40, type: docx.WidthType.PERCENTAGE }
+            })
+        );
 
         out.push(
             new docx.Paragraph({
@@ -1450,7 +1329,7 @@ class WordGenerator {
                     text: 'An important aspect of being a professional is that of honor and professional conduct.',
                     size: 20
                 })],
-                spacing: { before: showPointsTable ? 280 : 80, after: 120 }
+                spacing: { before: 280, after: 120 }
             }),
             new docx.Paragraph({
                 children: [new docx.TextRun({
@@ -1656,6 +1535,54 @@ class WordGenerator {
                 spacing: { after: 400 }
             })
         );
+
+        // 總題數／作答檢查表／勾選格表：僅 Financial 保留；Managerial 已有封面作答格，題目頁不再重複
+        if (currentSubject !== 'managerial') {
+            allChildren.push(
+                new docx.Paragraph({
+                    children: [new docx.TextRun({ text: `總題數：${questions.length} 題` })],
+                    alignment: docx.AlignmentType.CENTER,
+                    spacing: { after: 600 }
+                })
+            );
+            const cols = 5;
+            const rows = Math.ceil(questions.length / cols);
+            const tableRows = [];
+            for (let row = 0; row < rows; row++) {
+                const cells = [];
+                for (let col = 0; col < cols; col++) {
+                    const index = row * cols + col;
+                    if (index < questions.length) {
+                        cells.push(
+                            new docx.TableCell({
+                                children: [
+                                    new docx.Paragraph({
+                                        children: [new docx.TextRun({ text: `${index + 1}`, size: 18 })],
+                                        alignment: docx.AlignmentType.CENTER
+                                    }),
+                                    new docx.Paragraph({
+                                        children: [new docx.TextRun({ text: '⬜', size: 20 })],
+                                        alignment: docx.AlignmentType.CENTER
+                                    })
+                                ],
+                                width: { size: 20, type: docx.WidthType.PERCENTAGE }
+                            })
+                        );
+                    } else {
+                        cells.push(new docx.TableCell({ children: [], width: { size: 20, type: docx.WidthType.PERCENTAGE } }));
+                    }
+                }
+                tableRows.push(new docx.TableRow({ children: cells }));
+            }
+            allChildren.push(
+                new docx.Paragraph({
+                    children: [new docx.TextRun({ text: '作答檢查表', bold: true, size: 24 })],
+                    spacing: { after: 200 }
+                })
+            );
+            allChildren.push(new docx.Table({ rows: tableRows, width: { size: 100, type: docx.WidthType.PERCENTAGE } }));
+            allChildren.push(new docx.Paragraph({ children: [], spacing: { after: 400 } }));
+        }
 
         // 題目內容（移除所有標記和原始 ID）
         questions.forEach((q, index) => {
