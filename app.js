@@ -857,48 +857,6 @@ function replaceFirstQuestionNumberWithRoman(tblXmlString, romanLabel) {
     return tblXmlString;
 }
 
-
-/**
- * 將單題 XML（<w:tbl> 或 <w:p>）內第一個題號改成阿拉伯數字（如 21. ）
- * @param {string} xmlString
- * @param {number|string} questionNumber
- * @returns {string}
- */
-function replaceFirstQuestionNumberWithArabic(xmlString, questionNumber) {
-    if (!xmlString || typeof xmlString !== 'string') return xmlString;
-    const num = parseInt(questionNumber, 10);
-    if (isNaN(num) || num < 1) return xmlString;
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xmlString, 'application/xml');
-    const parseErr = doc.querySelector('parsererror');
-    if (parseErr) return xmlString;
-    const root = doc.documentElement;
-    if (!root) return xmlString;
-
-    const tNodes = root.getElementsByTagNameNS(W_NS, 't');
-    const re = /^\s*\d{1,4}\.\s*/;
-    for (let i = 0; i < tNodes.length; i++) {
-        const t = tNodes[i];
-        const text = t.textContent || '';
-        if (re.test(text)) {
-            t.textContent = text.replace(re, String(num) + '. ');
-            return new XMLSerializer().serializeToString(root);
-        }
-    }
-
-    // fallback：找不到原題號時，補在第一個文字節點前
-    if (tNodes.length > 0) {
-        tNodes[0].textContent = String(num) + '. ' + (tNodes[0].textContent || '').replace(/^\s*/, '');
-        return new XMLSerializer().serializeToString(root);
-    }
-    return xmlString;
-}
-
-function sanitizeNonMcForQuestionSheet(xmlString) {
-    const stripped = stripAnswerFromWordTblXml(xmlString);
-    return appendBlankAnswerSpaceToTblXml_NoLines(stripped, 12);
-}
-
 // 遞迴取得元素內所有 w:t 的文字（題號在 w:tbl → w:tc → w:p → w:t 內）
 function getAllTextFromElement(elem) {
     const tNodes = elem.getElementsByTagNameNS(W_NS, 't');
@@ -1266,7 +1224,8 @@ async function injectNonMcIntoQuestionsDocx(questionsBlobFromDocxJs, selectedWor
         const startRoman = 2; // II = 2
         const insertXml = selectedWordQuestions
             .map((q, idx) => {
-                const withSpace = sanitizeNonMcForQuestionSheet(q.xmlString);
+                const stripped = stripAnswerFromWordTblXml(q.xmlString);
+                const withSpace = appendBlankAnswerSpaceToTblXml_NoLines(stripped, 12);
                 const romanLabel = toRoman(startRoman + idx);
                 return replaceFirstQuestionNumberWithRoman(withSpace, romanLabel);
             })
@@ -1284,90 +1243,6 @@ async function injectNonMcIntoQuestionsDocx(questionsBlobFromDocxJs, selectedWor
     } catch (e) {
         console.error('[injectNonMc] 注入失敗:', e);
         return questionsBlobFromDocxJs;
-    }
-}
-
-
-
-async function injectFinancialNonMcIntoQuestionsDocx(questionsBlobFromDocxJs, selectedWordQuestions, startQuestionNumber) {
-    try {
-        const arrayBuffer = await questionsBlobFromDocxJs.arrayBuffer();
-        const questionsZip = await JSZip.loadAsync(arrayBuffer);
-        let documentXml = await questionsZip.file('word/document.xml').async('string');
-        const markerIndex = documentXml.indexOf(NONMC_INSERT_MARKER);
-        if (markerIndex === -1) {
-            console.warn('[injectFinancialNonMc] 找不到插入點 marker，跳過 XML 注入');
-            return questionsBlobFromDocxJs;
-        }
-        const pStartSearch = documentXml.lastIndexOf('<w:p', markerIndex);
-        const pEndSearch = documentXml.indexOf('</w:p>', markerIndex);
-        if (pStartSearch === -1 || pEndSearch === -1) {
-            console.warn('[injectFinancialNonMc] 無法定位 marker 段落，跳過 XML 注入');
-            return questionsBlobFromDocxJs;
-        }
-        const pEnd = pEndSearch + '</w:p>'.length;
-        const start = (parseInt(startQuestionNumber, 10) || 0) + 1;
-        const insertXml = selectedWordQuestions
-            .map((q, idx) => {
-                const cleanedForQuestionSheet = sanitizeNonMcForQuestionSheet(q.xmlString);
-                return replaceFirstQuestionNumberWithArabic(cleanedForQuestionSheet, start + idx);
-            })
-            .join('\n');
-
-        const pageBreakXml = buildPageBreakParagraphXml();
-        documentXml = documentXml.substring(0, pStartSearch) + pageBreakXml + '\n' + insertXml + documentXml.substring(pEnd);
-        questionsZip.file('word/document.xml', documentXml);
-        const newBlob = await questionsZip.generateAsync({
-            type: 'blob',
-            mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            compression: 'DEFLATE'
-        });
-        console.log('[injectFinancialNonMc] XML 注入完成，共注入 ' + selectedWordQuestions.length + ' 題，起始題號=' + start);
-        return newBlob;
-    } catch (e) {
-        console.error('[injectFinancialNonMc] 注入失敗:', e);
-        return questionsBlobFromDocxJs;
-    }
-}
-
-
-
-async function injectFinancialNonMcIntoAnswersDocx(answersBlobFromDocxJs, selectedWordQuestions, startQuestionNumber) {
-    try {
-        const arrayBuffer = await answersBlobFromDocxJs.arrayBuffer();
-        const answersZip = await JSZip.loadAsync(arrayBuffer);
-        let documentXml = await answersZip.file('word/document.xml').async('string');
-        const markerIndex = documentXml.indexOf(NONMC_ANSWER_INSERT_MARKER);
-        if (markerIndex === -1) {
-            console.warn('[injectFinancialNonMcAnswers] 找不到插入點 marker，跳過 XML 注入');
-            return answersBlobFromDocxJs;
-        }
-        const pStartSearch = documentXml.lastIndexOf('<w:p', markerIndex);
-        const pEndSearch = documentXml.indexOf('</w:p>', markerIndex);
-        if (pStartSearch === -1 || pEndSearch === -1) {
-            console.warn('[injectFinancialNonMcAnswers] 無法定位 marker 段落，跳過 XML 注入');
-            return answersBlobFromDocxJs;
-        }
-        const pEnd = pEndSearch + '</w:p>'.length;
-        const start = (parseInt(startQuestionNumber, 10) || 0) + 1;
-        const insertXml = selectedWordQuestions.map((q, idx) => {
-            const srcP = buildSourceParagraphXml(q.sourceFileName || q.sourceDocName || 'Unknown');
-            const finalXml = replaceFirstQuestionNumberWithArabic(q.xmlString, start + idx);
-            return srcP + '\n' + finalXml;
-        }).join('\n');
-        const pageBreakXml = buildPageBreakParagraphXml();
-        documentXml = documentXml.substring(0, pStartSearch) + pageBreakXml + '\n' + insertXml + documentXml.substring(pEnd);
-        answersZip.file('word/document.xml', documentXml);
-        const newBlob = await answersZip.generateAsync({
-            type: 'blob',
-            mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            compression: 'DEFLATE'
-        });
-        console.log('[injectFinancialNonMcAnswers] XML 注入完成，共注入 ' + selectedWordQuestions.length + ' 題，起始題號=' + start);
-        return newBlob;
-    } catch (e) {
-        console.error('[injectFinancialNonMcAnswers] 注入失敗:', e);
-        return answersBlobFromDocxJs;
     }
 }
 
@@ -1761,7 +1636,7 @@ class WordGenerator {
             return out;
         };
 
-        if (currentSubject === 'managerial' || currentSubject === 'financial') {
+        if (currentSubject === 'managerial') {
             allChildren.push(...this._buildManagerialCoverPage(questions.length, examName, points));
         } else if (currentSubject === 'financial') {
             allChildren.push(...this._buildFinancialCoverPage(questions.length, examName));
@@ -2062,22 +1937,8 @@ class WordGenerator {
             });
         }
 
-        // Word / Financial Non-MC 區塊插入點
-        if (wordNonMcSelected && wordNonMcSelected.length > 0) {
-            if (currentSubject === 'financial') {
-                allChildren.push(
-                    new docx.Paragraph({
-                        children: [
-                            new docx.TextRun({
-                                text: 'II. PROBLEMS',
-                                bold: true,
-                                size: 22
-                            })
-                        ],
-                        spacing: { before: 400, after: 200 }
-                    })
-                );
-            }
+        // Word 非選擇題區塊（僅 Managerial）：不輸出標題，只保留 marker 段落供 inject 插入
+        if (currentSubject === 'managerial' && wordNonMcSelected && wordNonMcSelected.length > 0) {
             allChildren.push(
                 new docx.Paragraph({
                     children: [
@@ -3324,9 +3185,9 @@ generateBtn.addEventListener('click', async () => {
             }
         }
 
-        // Word / Financial Non-MC 抽題：每檔各自抽 requestedCount，合併後再 shuffle
+        // Word 非選擇題抽題（僅 Managerial）：每檔各自抽 requestedCount，合併後再 shuffle
         let wordNonMcSelected = [];
-        if (wordParseState === 'parsed' && wordDocs.length > 0) {
+        if (currentSubject === 'managerial' && wordParseState === 'parsed' && wordDocs.length > 0) {
             const wordNonMcSelectedByDoc = [];
             for (let i = 0; i < wordDocs.length; i++) {
                 const req = wordDocs[i].requestedCount || 0;
@@ -3350,22 +3211,14 @@ generateBtn.addEventListener('click', async () => {
         console.log('Generating Questions doc...');
         let questionBlob = await wordGen.generateQuestionSheet(examName, examQuestions, examPoints, exSelectedAll, wordNonMcSelected);
         if (wordNonMcSelected.length > 0) {
-            if (currentSubject === 'financial') {
-                questionBlob = await injectFinancialNonMcIntoQuestionsDocx(questionBlob, wordNonMcSelected, examQuestions.length);
-            } else {
-                questionBlob = await injectNonMcIntoQuestionsDocx(questionBlob, wordNonMcSelected, wordDocxZip);
-            }
+            questionBlob = await injectNonMcIntoQuestionsDocx(questionBlob, wordNonMcSelected, wordDocxZip);
         }
         console.log('Questions doc generated');
         
         console.log('Generating Answers doc...');
         let answerBlob = await wordGen.generateAnswerSheet(examName, examQuestions, exSelectedAll, wordNonMcSelected);
         if (wordNonMcSelected.length > 0) {
-            if (currentSubject === 'financial') {
-                answerBlob = await injectFinancialNonMcIntoAnswersDocx(answerBlob, wordNonMcSelected, examQuestions.length);
-            } else {
-                answerBlob = await injectNonMcIntoAnswersDocx(answerBlob, wordNonMcSelected, wordDocxZip);
-            }
+            answerBlob = await injectNonMcIntoAnswersDocx(answerBlob, wordNonMcSelected, wordDocxZip);
         }
         console.log('Answers doc generated');
         
