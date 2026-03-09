@@ -1442,10 +1442,6 @@ class WordGenerator {
         return out;
     }
 
-    _buildFinancialCoverPage(questionCount, examName) {
-        return this._buildManagerialCoverPage(questionCount, examName, null, { mode: 'financial' });
-    }
-
     // Answer Sheet 專用：由左到右、每列 perRow 題的答案摘要格（與題目卷答案格同版型）
     _buildHorizontalAnswerGrid(questions, perRow) {
         perRow = perRow || 10;
@@ -1517,8 +1513,6 @@ class WordGenerator {
 
         if (currentSubject === 'managerial') {
             allChildren.push(...this._buildManagerialCoverPage(questions.length, examName, points));
-        } else if (currentSubject === 'financial') {
-            allChildren.push(...this._buildFinancialCoverPage(questions.length, examName));
         }
         
         // 1. 標題
