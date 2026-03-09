@@ -1321,8 +1321,8 @@ class WordGenerator {
         });
     }
 
-    // Managerial 專用：產生封面頁元素（含答案格），傳入題目總數以決定格數
-    _buildManagerialCoverPage(questionCount, examName, points) {
+    // 共用封面版型（Managerial / Financial），以 coverOptions 控制差異
+    _buildManagerialCoverPage(questionCount, examName, points, coverOptions = {}) {
         // 安全 fallback：如果沒有傳入 points 或 rows 不存在，使用預設值
         const defaultRows = [
             { label: "I", value: 150 },
@@ -1338,6 +1338,19 @@ class WordGenerator {
         const ptsTotal = (points && points.total !== undefined && points.total !== null) 
             ? points.total 
             : defaultTotal;
+        const isFinancialCover = coverOptions && coverOptions.mode === 'financial';
+        const showPointsTable = !isFinancialCover;
+        const introInstructions = isFinancialCover
+            ? [
+                '• Please write your answers clearly and legibly.',
+                '• Transfer your multiple choice answers to the answer grid on this coversheet.',
+                '• Choose the best answer for each question.'
+            ]
+            : [
+                '• For open-ended questions, you must show all supporting calculations in an ORGANIZED way to be eligible to receive total credit. If not, you\'ll not get partial credit.',
+                '• For open-ended question, you will receive minimum or zero points if you only show answers without any supporting calculations.',
+                '• You must transfer your answers for the multiple choice questions to this coversheet below. If not, you\'ll lose 10 points.'
+            ];
         
         // 封面頁表格行高設定（單位：twips，1 twip = 1/20 point）
         const COVER_POINTS_ROW_HEIGHT = 500; // Points 表格行高（約 25 points，明顯變高方便手寫）
@@ -1369,24 +1382,15 @@ class WordGenerator {
                 spacing: { after: 320 }
             }),
             new docx.Paragraph({
-                children: [new docx.TextRun({
-                    text: '• For open-ended questions, you must show all supporting calculations in an ORGANIZED way to be eligible to receive total credit. If not, you\'ll not get partial credit.',
-                    size: 20
-                })],
+                children: [new docx.TextRun({ text: introInstructions[0], size: 20 })],
                 spacing: { after: 120 }
             }),
             new docx.Paragraph({
-                children: [new docx.TextRun({
-                    text: '• For open-ended question, you will receive minimum or zero points if you only show answers without any supporting calculations.',
-                    size: 20
-                })],
+                children: [new docx.TextRun({ text: introInstructions[1], size: 20 })],
                 spacing: { after: 120 }
             }),
             new docx.Paragraph({
-                children: [new docx.TextRun({
-                    text: '• You must transfer your answers for the multiple choice questions to this coversheet below. If not, you\'ll lose 10 points.',
-                    size: 20
-                })],
+                children: [new docx.TextRun({ text: introInstructions[2], size: 20 })],
                 spacing: { after: 240 }
             })
         );
@@ -1431,12 +1435,14 @@ class WordGenerator {
                 ] 
             })
         );
-        out.push(
-            new docx.Table({
-                rows: pointsTableRows,
-                width: { size: 40, type: docx.WidthType.PERCENTAGE }
-            })
-        );
+        if (showPointsTable) {
+            out.push(
+                new docx.Table({
+                    rows: pointsTableRows,
+                    width: { size: 40, type: docx.WidthType.PERCENTAGE }
+                })
+            );
+        }
 
         out.push(
             new docx.Paragraph({
@@ -1444,7 +1450,7 @@ class WordGenerator {
                     text: 'An important aspect of being a professional is that of honor and professional conduct.',
                     size: 20
                 })],
-                spacing: { before: 280, after: 120 }
+                spacing: { before: showPointsTable ? 280 : 80, after: 120 }
             }),
             new docx.Paragraph({
                 children: [new docx.TextRun({
@@ -1557,6 +1563,10 @@ class WordGenerator {
         return out;
     }
 
+    _buildFinancialCoverPage(questionCount, examName) {
+        return this._buildManagerialCoverPage(questionCount, examName, null, { mode: 'financial' });
+    }
+
     // Answer Sheet 專用：由左到右、每列 perRow 題的答案摘要格（與題目卷答案格同版型）
     _buildHorizontalAnswerGrid(questions, perRow) {
         perRow = perRow || 10;
@@ -1628,6 +1638,8 @@ class WordGenerator {
 
         if (currentSubject === 'managerial') {
             allChildren.push(...this._buildManagerialCoverPage(questions.length, examName, points));
+        } else if (currentSubject === 'financial') {
+            allChildren.push(...this._buildFinancialCoverPage(questions.length, examName));
         }
         
         // 1. 標題
@@ -1644,54 +1656,6 @@ class WordGenerator {
                 spacing: { after: 400 }
             })
         );
-
-        // 總題數／作答檢查表／勾選格表：僅 Financial 保留；Managerial 已有封面作答格，題目頁不再重複
-        if (currentSubject !== 'managerial') {
-            allChildren.push(
-                new docx.Paragraph({
-                    children: [new docx.TextRun({ text: `總題數：${questions.length} 題` })],
-                    alignment: docx.AlignmentType.CENTER,
-                    spacing: { after: 600 }
-                })
-            );
-            const cols = 5;
-            const rows = Math.ceil(questions.length / cols);
-            const tableRows = [];
-            for (let row = 0; row < rows; row++) {
-                const cells = [];
-                for (let col = 0; col < cols; col++) {
-                    const index = row * cols + col;
-                    if (index < questions.length) {
-                        cells.push(
-                            new docx.TableCell({
-                                children: [
-                                    new docx.Paragraph({
-                                        children: [new docx.TextRun({ text: `${index + 1}`, size: 18 })],
-                                        alignment: docx.AlignmentType.CENTER
-                                    }),
-                                    new docx.Paragraph({
-                                        children: [new docx.TextRun({ text: '⬜', size: 20 })],
-                                        alignment: docx.AlignmentType.CENTER
-                                    })
-                                ],
-                                width: { size: 20, type: docx.WidthType.PERCENTAGE }
-                            })
-                        );
-                    } else {
-                        cells.push(new docx.TableCell({ children: [], width: { size: 20, type: docx.WidthType.PERCENTAGE } }));
-                    }
-                }
-                tableRows.push(new docx.TableRow({ children: cells }));
-            }
-            allChildren.push(
-                new docx.Paragraph({
-                    children: [new docx.TextRun({ text: '作答檢查表', bold: true, size: 24 })],
-                    spacing: { after: 200 }
-                })
-            );
-            allChildren.push(new docx.Table({ rows: tableRows, width: { size: 100, type: docx.WidthType.PERCENTAGE } }));
-            allChildren.push(new docx.Paragraph({ children: [], spacing: { after: 400 } }));
-        }
 
         // 題目內容（移除所有標記和原始 ID）
         questions.forEach((q, index) => {
