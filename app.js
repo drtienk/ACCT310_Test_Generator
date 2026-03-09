@@ -20,7 +20,7 @@ const SUBJECT_CONFIG = {
 let currentSubject = 'managerial';
 
 // Managerial Accounting Exam Name Builder 設定
-const MANAGERIAL_EXAMNAME_PREFIX = "ACCT 201 Managerial Accounting";
+const MANAGERIAL_EXAMNAME_PREFIX = "ACCT 310 Intermediate Accounting I";
 let selectedYear = '2026';
 let selectedTerm = 'Spring';
 let selectedExamType = 'Exam 1';
