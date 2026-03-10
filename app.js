@@ -92,6 +92,8 @@ class PDFParser {
                     exQuestions: exQuestions,
                     pdfNonMcQuestions: pdfNonMcQuestions
                 });
+
+                console.log('[Parser][ByFile] ' + file.name + ': MC=' + mcQuestions.length + ', EX=' + exQuestions.length + ', PDF_NON_MC=' + pdfNonMcQuestions.length);
             } catch (error) {
                 console.error(`解析 ${file.name} 失敗:`, error);
                 throw new Error(`無法解析 ${file.name}: ${error.message}`);
@@ -249,12 +251,28 @@ class PDFParser {
             /^show\s+all\s+feedback/i,
             /^hide\s+all\s+feedback/i,
             /^score\s*:/i,
-            /^time\s+elapsed\s*:/i
+            /^time\s+elapsed\s*:/i,
+            /^problems\?/i,
+            /^previous\s+next$/i,
+            /^complete\s+this\s+question\s+by\s+entering\s+your\s+answers/i,
+            /^required\s*1\s+required\s*2$/i,
+            /^required\s*\d+$/i,
+            /^hint(s)?\b/i,
+            /^references?\b/i,
+            /^source\s*:/i,
+            /^learning\s+objective\s*:/i,
+            /^difficulty\s*:/i,
+            /^medium$/i,
+            /^general$/i,
+            /^journal$/i,
+            /^general\s+journal$/i
         ];
 
         return (lines || []).filter(function(line) {
+            const normalized = String(line == null ? '' : line).replace(/\s+/g, ' ').trim();
+            if (!normalized) return false;
             for (var i = 0; i < noisePatterns.length; i++) {
-                if (noisePatterns[i].test(line)) return false;
+                if (noisePatterns[i].test(normalized)) return false;
             }
             return true;
         });
