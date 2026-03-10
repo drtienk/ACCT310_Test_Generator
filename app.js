@@ -215,8 +215,7 @@ class PDFParser {
                 if (nonMc) {
                     pdfNonMcQuestions.push(nonMc);
                     pageDiagnostics.push({ page: pageNum, ok: true, type: 'pdf-non-mc', reason: 'fallback-parsed' });
-                    const preview = (nonMc.promptText || '').slice(0, 80).replace(/\s+/g, ' ');
-                    console.log('[Financial][' + fileBaseName + '][p' + pageNum + '] ✓ 判定為 PDF_NON_MC, prompt="' + preview + '", hasRequired=' + (!!nonMc.requiredText) + ', hasAnswer=' + (!!nonMc.answerText));
+                    console.log('[Financial][' + fileBaseName + '][p' + pageNum + '] ✓ 判定為 PDF_NON_MC');
                 } else {
                     pageDiagnostics.push({ page: pageNum, ok: false, type: 'unknown', reason: 'no-question' });
                     console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] ✗ MC / PDF_NON_MC 都未解析成功');
@@ -312,137 +311,63 @@ class PDFParser {
         return out;
     }
 
-    extractFinancialQuestionBody(lines) {
-        const normalizedLines = this.normalizeFinancialLines(lines);
-        const cleanedLines = this.removeFinancialNoiseLines(normalizedLines);
-        const awardIdx = this.findFinancialStartIndex(cleanedLines);
-        if (awardIdx < 0) return [];
-
-        const content = cleanedLines.slice(awardIdx + 1);
-        const tailStopPatterns = [
-            /^hint(s)?\b/i,
-            /^references?\b/i,
-            /^source\s*:/i,
-            /^learning\s+objective\s*:/i,
-            /^difficulty\s*:/i,
-            /^multiple\s+choice\b/i,
-            /^question\s+\d+/i
-        ];
-
-        const bodyLines = [];
-        for (let i = 0; i < content.length; i++) {
-            const line = String(content[i] || '').replace(/\s+/g, ' ').trim();
-            if (!line) continue;
-            let stop = false;
-            for (let p = 0; p < tailStopPatterns.length; p++) {
-                if (tailStopPatterns[p].test(line)) {
-                    stop = true;
-                    break;
-                }
-            }
-            if (stop) break;
-            bodyLines.push(line);
-        }
-
-        return this.removeFinancialNoiseLines(bodyLines);
-    }
-
     shouldTreatFinancialPageAsNonMc(lines) {
-        const bodyLines = this.extractFinancialQuestionBody(lines);
-        if (!bodyLines || bodyLines.length < 2) return false;
-
-        const text = bodyLines.join('\n');
+        if (!lines || lines.length < 2) return false;
+        const text = lines.join('\n');
         const hasRequired = /\bRequired\s*:/i.test(text);
-        const hasExplanation = /\bExplanation\s*:/i.test(text);
-        const hasAnswerLikeTerms = /(Allocated\s+Revenue|Number\s+of\s+performance\s+obligations|Sales\s+revenue|Deferred\s+revenue)/i.test(text);
-
-        const hasConnectMcSymbols = bodyLines.some(function(line) {
-            return line.indexOf(PDFParser.FINANCIAL_SYMBOLS.CIRCLE) !== -1 || line.indexOf(PDFParser.FINANCIAL_SYMBOLS.ARROW) !== -1;
-        });
-        const optionLetterCount = (text.match(/(?:^|\s)[a-e]\.\s+[^\n]+/ig) || []).length;
-        const hasRealMcOptions = hasConnectMcSymbols || optionLetterCount >= 2;
-
-        return (hasRequired || hasExplanation || hasAnswerLikeTerms) && !hasRealMcOptions;
+        const hasSolutionLike = /\b(Solution|Feedback|Explanation|Correct\s+Answer|Answer)\b\s*[:：]?/i.test(text);
+        const optionTokenCount = (text.match(/(?:^|\s)[a-e]\.\s+/ig) || []).length;
+        const hasLongNarrative = text.replace(/\s+/g, ' ').length > 200;
+        return (hasRequired || hasSolutionLike || hasLongNarrative) && optionTokenCount < 2;
     }
 
     splitFinancialNonMcBody(bodyText) {
-        const cleanNoiseInline = (text) => {
-            let out = String(text || '');
-            out = out.replace(/\bRequired\s*1\s*Required\s*2\b/ig, ' ');
-            out = out.replace(/Complete\s+this\s+question\s+by\s+entering\s+your\s+answers\.?/ig, ' ');
-            out = out.replace(/\s+/g, ' ').trim();
-            return out;
-        };
-
         let promptText = '';
         let requiredText = '';
         let answerText = '';
         let feedbackText = '';
-
-        const working = cleanNoiseInline(bodyText);
-        if (!working) return { promptText, requiredText, answerText, feedbackText };
+        let working = String(bodyText || '').trim();
 
         const requiredMatch = working.match(/\bRequired\s*:/i);
-        const explanationMatch = working.match(/\bExplanation\s*:/i);
-        const answerMarkerMatch = working.match(/\b(?:Answer|Solution|Correct\s+Answer)\s*:/i);
-
         if (requiredMatch && requiredMatch.index != null) {
-            promptText = cleanNoiseInline(working.substring(0, requiredMatch.index));
-            const afterRequired = working.substring(requiredMatch.index).replace(/^\bRequired\s*:\s*/i, '').trim();
+            promptText = working.substring(0, requiredMatch.index).trim();
+            working = working.substring(requiredMatch.index).trim();
+        }
 
-            let requiredEnd = afterRequired.length;
-            let explanationIndexInAfter = -1;
-            let answerMarkerIndexInAfter = -1;
-
-            const explanationInAfter = afterRequired.match(/\bExplanation\s*:/i);
-            if (explanationInAfter && explanationInAfter.index != null) explanationIndexInAfter = explanationInAfter.index;
-            const answerMarkerInAfter = afterRequired.match(/\b(?:Answer|Solution|Correct\s+Answer)\s*:/i);
-            if (answerMarkerInAfter && answerMarkerInAfter.index != null) answerMarkerIndexInAfter = answerMarkerInAfter.index;
-
-            if (explanationIndexInAfter >= 0) requiredEnd = Math.min(requiredEnd, explanationIndexInAfter);
-            if (answerMarkerIndexInAfter >= 0) requiredEnd = Math.min(requiredEnd, answerMarkerIndexInAfter);
-
-            requiredText = cleanNoiseInline(afterRequired.substring(0, requiredEnd));
-            const trailing = cleanNoiseInline(afterRequired.substring(requiredEnd));
-
-            if (explanationIndexInAfter >= 0) {
-                const explanationBody = trailing.replace(/^\bExplanation\s*:\s*/i, '').trim();
-                feedbackText = cleanNoiseInline(explanationBody);
-            } else if (answerMarkerIndexInAfter >= 0) {
-                answerText = cleanNoiseInline(trailing.replace(/^\b(?:Answer|Solution|Correct\s+Answer)\s*:\s*/i, ''));
-            }
-
-            if (!answerText && requiredText) {
-                const marker = requiredText.match(/\b(Allocated\s+Revenue|Number\s+of\s+performance\s+obligations|Sales\s+revenue|Deferred\s+revenue)\b/i);
-                if (marker && marker.index != null && marker.index > 0) {
-                    answerText = cleanNoiseInline(requiredText.substring(marker.index));
-                    requiredText = cleanNoiseInline(requiredText.substring(0, marker.index));
-                }
-            }
+        const answerMatch = working.match(/\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]/i);
+        if (answerMatch && answerMatch.index != null) {
+            const requiredBlock = working.substring(0, answerMatch.index).trim();
+            requiredText = requiredBlock.replace(/^Required\s*[:：]?\s*/i, '').trim();
+            working = working.substring(answerMatch.index).trim();
         } else {
-            const firstMarker = explanationMatch || answerMarkerMatch;
-            if (firstMarker && firstMarker.index != null && firstMarker.index > 0) {
-                promptText = cleanNoiseInline(working.substring(0, firstMarker.index));
-                const tail = cleanNoiseInline(working.substring(firstMarker.index));
-                if (/^\bExplanation\s*:/i.test(tail)) {
-                    feedbackText = cleanNoiseInline(tail.replace(/^\bExplanation\s*:\s*/i, ''));
-                } else {
-                    answerText = cleanNoiseInline(tail.replace(/^\b(?:Answer|Solution|Correct\s+Answer)\s*:\s*/i, ''));
-                }
+            requiredText = working.replace(/^Required\s*[:：]?\s*/i, '').trim();
+            working = '';
+        }
+
+        if (working) {
+            const feedbackMatch = working.match(/\bFeedback\s*[:：]/i);
+            if (feedbackMatch && feedbackMatch.index != null) {
+                answerText = working.substring(0, feedbackMatch.index).replace(/^\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, '').trim();
+                feedbackText = working.substring(feedbackMatch.index).replace(/^Feedback\s*[:：]?\s*/i, '').trim();
             } else {
-                promptText = working;
+                answerText = working.replace(/^\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, '').trim();
             }
+        }
+
+        if (!promptText && requiredText) {
+            promptText = requiredText;
+            requiredText = '';
         }
 
         return { promptText, requiredText, answerText, feedbackText };
     }
 
     parseFinancialNonMcOnePage(lines, pageNum, sourceFileName) {
-        const bodyLines = this.extractFinancialQuestionBody(lines);
-        if (!bodyLines || bodyLines.length === 0) return null;
-        if (!this.shouldTreatFinancialPageAsNonMc(lines)) return null;
+        const normalizedLines = this.normalizeFinancialLines(lines);
+        const cleanedLines = this.removeFinancialNoiseLines(normalizedLines);
+        if (!this.shouldTreatFinancialPageAsNonMc(cleanedLines)) return null;
 
-        const rawBlockText = bodyLines.join('\n').trim();
+        const rawBlockText = cleanedLines.join('\n').trim();
         if (!rawBlockText) return null;
 
         const parsed = this.splitFinancialNonMcBody(rawBlockText);
