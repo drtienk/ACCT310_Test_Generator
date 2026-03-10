@@ -398,46 +398,6 @@ class PDFParser {
         return (hasRequired || hasSolutionLike || hasLongNarrative) && optionTokenCount < 2;
     }
 
-    isFinancialContinuationPage(lines, bodyText) {
-        const text = String(bodyText == null ? '' : bodyText);
-        if (!text) return false;
-        if (this.hasFinancialAwardLine(lines)) return false;
-        const optionTokenCount = (text.match(/(?:^|\s)[a-e]\.\s+/ig) || []).length;
-        if (optionTokenCount >= 2) return false;
-        const hasAnswerLike = /\b(Explanation|Solution|Answer|Feedback|Journal\s+Entry|General\s+Journal|Debit|Credit)\b\s*[:：]?/i.test(text);
-        const hasAnyContent = text.replace(/\s+/g, ' ').length > 80;
-        return hasAnyContent && (hasAnswerLike || !/\bRequired\s*[:：]/i.test(text));
-    }
-
-    mergeFinancialNonMcSegments(segments, sourceFileName) {
-        const safeSegments = (segments || []).filter(function(seg) {
-            return seg && seg.bodyText && seg.bodyText.trim();
-        });
-        if (safeSegments.length === 0) return null;
-
-        const mergedText = this.cleanFinancialNonMcMultilineText(
-            safeSegments.map(function(seg) { return seg.bodyText; }).join('\n')
-        );
-        const parsed = this.splitFinancialNonMcBody(mergedText);
-        if (!parsed.promptText && !parsed.requiredText && !parsed.answerText && !parsed.feedbackText) return null;
-
-        const sourcePageStart = safeSegments[0].pageNum;
-        const sourcePageEnd = safeSegments[safeSegments.length - 1].pageNum;
-        return {
-            originalId: (sourceFileName || 'PDF').replace(/\.pdf$/i, '') + '-nonmc-p' + sourcePageStart + (sourcePageEnd > sourcePageStart ? '-p' + sourcePageEnd : ''),
-            type: 'PDF_NON_MC',
-            promptText: parsed.promptText,
-            requiredText: parsed.requiredText,
-            answerText: parsed.answerText,
-            feedbackText: parsed.feedbackText,
-            rawBlockText: mergedText,
-            sourceFileName: sourceFileName || '',
-            sourcePage: sourcePageStart,
-            sourcePageStart: sourcePageStart,
-            sourcePageEnd: sourcePageEnd
-        };
-    }
-
     cleanFinancialNonMcMultilineText(text) {
         const normalized = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
         const lines = normalized.split('\n').map(line => line.trim());
@@ -472,16 +432,6 @@ class PDFParser {
         let feedbackText = '';
         let working = this.cleanFinancialNonMcMultilineText(bodyText);
 
-        // 移除常見尾端 footer / metadata 噪音
-        working = this.cleanFinancialNonMcMultilineText(
-            working
-                .replace(/\n(?:Learning\s+Objective\s*:.*)$/is, '')
-                .replace(/\n(?:Difficulty\s*:.*)$/is, '')
-                .replace(/\n(?:Source\s*:.*)$/is, '')
-                .replace(/\n(?:References?\s*)$/is, '')
-                .replace(/\n(?:Algorithmic\s+and\s+Static\s*)$/is, '')
-        );
-
         const requiredMatch = working.match(/\bRequired\s*[:：]/i);
         if (requiredMatch && requiredMatch.index != null) {
             promptText = this.cleanFinancialNonMcMultilineText(working.substring(0, requiredMatch.index));
@@ -501,10 +451,10 @@ class PDFParser {
         if (working) {
             const feedbackMatch = working.match(/\bFeedback\s*[:：]/i);
             if (feedbackMatch && feedbackMatch.index != null) {
-                answerText = this.cleanFinancialNonMcMultilineText(working.substring(0, feedbackMatch.index).replace(/^(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, ''));
+                answerText = this.cleanFinancialNonMcMultilineText(working.substring(0, feedbackMatch.index).replace(/^\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, ''));
                 feedbackText = this.cleanFinancialNonMcMultilineText(working.substring(feedbackMatch.index).replace(/^Feedback\s*[:：]?\s*/i, ''));
             } else {
-                answerText = this.cleanFinancialNonMcMultilineText(working.replace(/^(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, ''));
+                answerText = this.cleanFinancialNonMcMultilineText(working.replace(/^\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, ''));
             }
         }
 
@@ -517,9 +467,11 @@ class PDFParser {
     }
 
 
-    parseFinancialNonMcOnePage(lines, pageNum, sourceFileName) {
-        const bodyText = this.extractFinancialQuestionBody(lines);
-        if (!this.shouldTreatFinancialPageAsNonMc(lines, bodyText)) return null;
+        const rawBlockText = this.cleanFinancialNonMcMultilineText(cleanedLines.join('\n'));
+        if (!rawBlockText) return null;
+
+        const parsed = this.splitFinancialNonMcBody(rawBlockText);
+        if (!parsed.promptText && !parsed.requiredText) return null;
 
         const merged = this.mergeFinancialNonMcSegments([{ pageNum: pageNum, bodyText: bodyText }], sourceFileName);
         return merged;
