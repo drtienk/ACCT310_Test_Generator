@@ -30,7 +30,9 @@ let pdfFiles = [];
 let parsedQuestions = []; // 所有題目的陣列
 let parsedQuestionsByFile = []; // 按檔案分組的題目 [{file, questions}, ...]
 let parsedExerciseQuestions = []; // 所有 EX 題目的陣列（暫不進入匯出流程）
+let parsedPdfNonMcQuestions = []; // 所有 PDF Non-MC 題目的陣列
 let exRequestedCountsByFileIndex = []; // 使用者對每檔案設定的 EX 題數（state）
+let pdfNonMcRequestedCountsByFileIndex = []; // 使用者對每檔案設定的 PDF Non-MC 題數（state）
 let parser = null;
 let generator = null;
 
@@ -66,6 +68,7 @@ class PDFParser {
     async parsePDFs(files) {
         this.questions = [];
         const allExQuestions = [];
+        const allPdfNonMcQuestions = [];
         const resultsByFile = [];
         
         for (let i = 0; i < files.length; i++) {
@@ -74,17 +77,20 @@ class PDFParser {
                 const parsed = await this.parseSinglePDF(file);
                 const mcQuestions = (parsed && parsed.mcQuestions) ? parsed.mcQuestions : [];
                 const exQuestions = (parsed && parsed.exQuestions) ? parsed.exQuestions : [];
+                const pdfNonMcQuestions = (parsed && parsed.pdfNonMcQuestions) ? parsed.pdfNonMcQuestions : [];
 
                 // 注意：維持既有行為 —— allQuestions / questions 仍代表 MC（含 Financial）題目集合
                 this.questions = this.questions.concat(mcQuestions);
                 allExQuestions.push(...exQuestions);
+                allPdfNonMcQuestions.push(...pdfNonMcQuestions);
                 resultsByFile.push({
                     file: file,
                     fileName: file.name,
                     // 為了不破壞既有流程：questions 仍等於 MC 題目陣列
                     questions: mcQuestions,
                     mcQuestions: mcQuestions,
-                    exQuestions: exQuestions
+                    exQuestions: exQuestions,
+                    pdfNonMcQuestions: pdfNonMcQuestions
                 });
             } catch (error) {
                 console.error(`解析 ${file.name} 失敗:`, error);
@@ -95,6 +101,7 @@ class PDFParser {
         return {
             allQuestions: this.questions,
             allExQuestions: allExQuestions,
+            allPdfNonMcQuestions: allPdfNonMcQuestions,
             byFile: resultsByFile
         };
     }
@@ -156,8 +163,12 @@ class PDFParser {
         const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
         if (currentSubject === 'financial') {
-            const mcQuestions = await this.parseFinancialByPage(pdf, file);
-            return { mcQuestions, exQuestions: [] };
+            const financialResult = await this.parseFinancialByPage(pdf, file);
+            return {
+                mcQuestions: financialResult.mcQuestions || [],
+                exQuestions: [],
+                pdfNonMcQuestions: financialResult.pdfNonMcQuestions || []
+            };
         }
 
         // 以下是原有 Managerial 邏輯，完全不要動
@@ -171,11 +182,12 @@ class PDFParser {
         const fullText = allLines.join('\n');
         const mcQuestions = this.extractQuestionsFromText(fullText);
         const exQuestions = this.extractExerciseQuestionsFromText(fullText);
-        return { mcQuestions, exQuestions };
+        return { mcQuestions, exQuestions, pdfNonMcQuestions: [] };
     }
 
     async parseFinancialByPage(pdfDoc, fileMeta) {
-        const questions = [];
+        const mcQuestions = [];
+        const pdfNonMcQuestions = [];
         const fileBaseName = (fileMeta && fileMeta.name ? fileMeta.name : 'FA').replace(/\.pdf$/i, '');
         const pageDiagnostics = [];
 
@@ -191,15 +203,23 @@ class PDFParser {
                 const q = this.parseFinancialOnePage(lines, pageNum, fileBaseName);
 
                 if (q) {
-                    questions.push(q);
-                    pageDiagnostics.push({ page: pageNum, ok: true, reason: 'parsed' });
-                    console.log('[Financial][' + fileBaseName + '][p' + pageNum + '] ✓ opts=' + q.options.length + ', answer=' + q.correctOption);
+                    mcQuestions.push(q);
+                    pageDiagnostics.push({ page: pageNum, ok: true, type: 'mc', reason: 'parsed' });
+                    console.log('[Financial][' + fileBaseName + '][p' + pageNum + '] ✓ 判定為 MC, opts=' + q.options.length + ', answer=' + q.correctOption);
+                    continue;
+                }
+
+                const nonMc = this.parseFinancialNonMcOnePage(lines, pageNum, fileMeta && fileMeta.name ? fileMeta.name : fileBaseName + '.pdf');
+                if (nonMc) {
+                    pdfNonMcQuestions.push(nonMc);
+                    pageDiagnostics.push({ page: pageNum, ok: true, type: 'pdf-non-mc', reason: 'fallback-parsed' });
+                    console.log('[Financial][' + fileBaseName + '][p' + pageNum + '] ✓ 判定為 PDF_NON_MC');
                 } else {
-                    pageDiagnostics.push({ page: pageNum, ok: false, reason: 'no-question' });
-                    console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] ✗ 未解析出題目');
+                    pageDiagnostics.push({ page: pageNum, ok: false, type: 'unknown', reason: 'no-question' });
+                    console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] ✗ MC / PDF_NON_MC 都未解析成功');
                 }
             } catch (e) {
-                pageDiagnostics.push({ page: pageNum, ok: false, reason: 'exception: ' + e.message });
+                pageDiagnostics.push({ page: pageNum, ok: false, type: 'exception', reason: 'exception: ' + e.message });
                 console.error('[Financial][' + fileBaseName + '][p' + pageNum + '] 異常:', e.message);
             }
         }
@@ -209,8 +229,8 @@ class PDFParser {
             console.warn('[Financial][' + fileBaseName + '] 解析摘要: success=' + (pageDiagnostics.length - failedCount) + ', failed=' + failedCount);
         }
 
-        console.log('[Financial] ' + fileBaseName + ': 總共 ' + questions.length + ' 題');
-        return questions;
+        console.log('[Financial] ' + fileBaseName + ': MC=' + mcQuestions.length + ', PDF_NON_MC=' + pdfNonMcQuestions.length);
+        return { mcQuestions, pdfNonMcQuestions };
     }
 
     normalizeFinancialLines(rawLines) {
@@ -273,7 +293,83 @@ class PDFParser {
         return out;
     }
 
+    shouldTreatFinancialPageAsNonMc(lines) {
+        if (!lines || lines.length < 2) return false;
+        const text = lines.join('\n');
+        const hasRequired = /\bRequired\s*:/i.test(text);
+        const hasSolutionLike = /\b(Solution|Feedback|Explanation|Correct\s+Answer|Answer)\b\s*[:：]?/i.test(text);
+        const optionTokenCount = (text.match(/(?:^|\s)[a-e]\.\s+/ig) || []).length;
+        const hasLongNarrative = text.replace(/\s+/g, ' ').length > 200;
+        return (hasRequired || hasSolutionLike || hasLongNarrative) && optionTokenCount < 2;
+    }
+
+    splitFinancialNonMcBody(bodyText) {
+        let promptText = '';
+        let requiredText = '';
+        let answerText = '';
+        let feedbackText = '';
+        let working = String(bodyText || '').trim();
+
+        const requiredMatch = working.match(/\bRequired\s*:/i);
+        if (requiredMatch && requiredMatch.index != null) {
+            promptText = working.substring(0, requiredMatch.index).trim();
+            working = working.substring(requiredMatch.index).trim();
+        }
+
+        const answerMatch = working.match(/\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]/i);
+        if (answerMatch && answerMatch.index != null) {
+            const requiredBlock = working.substring(0, answerMatch.index).trim();
+            requiredText = requiredBlock.replace(/^Required\s*[:：]?\s*/i, '').trim();
+            working = working.substring(answerMatch.index).trim();
+        } else {
+            requiredText = working.replace(/^Required\s*[:：]?\s*/i, '').trim();
+            working = '';
+        }
+
+        if (working) {
+            const feedbackMatch = working.match(/\bFeedback\s*[:：]/i);
+            if (feedbackMatch && feedbackMatch.index != null) {
+                answerText = working.substring(0, feedbackMatch.index).replace(/^\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, '').trim();
+                feedbackText = working.substring(feedbackMatch.index).replace(/^Feedback\s*[:：]?\s*/i, '').trim();
+            } else {
+                answerText = working.replace(/^\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, '').trim();
+            }
+        }
+
+        if (!promptText && requiredText) {
+            promptText = requiredText;
+            requiredText = '';
+        }
+
+        return { promptText, requiredText, answerText, feedbackText };
+    }
+
+    parseFinancialNonMcOnePage(lines, pageNum, sourceFileName) {
+        const normalizedLines = this.normalizeFinancialLines(lines);
+        const cleanedLines = this.removeFinancialNoiseLines(normalizedLines);
+        if (!this.shouldTreatFinancialPageAsNonMc(cleanedLines)) return null;
+
+        const rawBlockText = cleanedLines.join('\n').trim();
+        if (!rawBlockText) return null;
+
+        const parsed = this.splitFinancialNonMcBody(rawBlockText);
+        if (!parsed.promptText && !parsed.requiredText) return null;
+
+        return {
+            originalId: (sourceFileName || 'PDF').replace(/\.pdf$/i, '') + '-nonmc-p' + pageNum,
+            type: 'PDF_NON_MC',
+            promptText: parsed.promptText,
+            requiredText: parsed.requiredText,
+            answerText: parsed.answerText,
+            feedbackText: parsed.feedbackText,
+            rawBlockText: rawBlockText,
+            sourceFileName: sourceFileName || '',
+            sourcePage: pageNum
+        };
+    }
+
     parseFinancialOnePage(lines, pageNum, fileBaseName) {
+
         var CIRCLE = '\uEA56';
         var ARROW = '\uEA57';
 
@@ -1920,7 +2016,60 @@ class WordGenerator {
     }
 
     // 生成題目卷（學生用）
-    async generateQuestionSheet(examName, questions, points, exSelectedAll = [], wordNonMcSelected = []) {
+    sanitizePdfNonMcForQuestionSheet(question) {
+        const q = question || {};
+        return {
+            originalId: q.originalId || '',
+            promptText: (q.promptText || '').trim(),
+            requiredText: (q.requiredText || '').trim(),
+            sourcePage: q.sourcePage || ''
+        };
+    }
+
+    renderPdfNonMcAnswerBlock(question, displayNumber) {
+        const q = question || {};
+        const out = [];
+        out.push(new docx.Paragraph({
+            children: [new docx.TextRun({ text: `${displayNumber}. ${q.promptText || ''}`, size: 22 })],
+            spacing: { before: displayNumber === 1 ? 0 : 300, after: 100 }
+        }));
+        if (q.requiredText) {
+            out.push(new docx.Paragraph({
+                children: [new docx.TextRun({ text: 'Required:', bold: true, size: 20 })],
+                spacing: { after: 50 }
+            }));
+            out.push(new docx.Paragraph({
+                children: [new docx.TextRun({ text: q.requiredText, size: 20 })],
+                indent: { left: 400 },
+                spacing: { after: 100 }
+            }));
+        }
+        if (q.answerText) {
+            out.push(new docx.Paragraph({
+                children: [new docx.TextRun({ text: 'Answer:', bold: true, size: 20 })],
+                spacing: { after: 50 }
+            }));
+            out.push(new docx.Paragraph({
+                children: [new docx.TextRun({ text: q.answerText, size: 20 })],
+                indent: { left: 400 },
+                spacing: { after: 100 }
+            }));
+        }
+        if (q.feedbackText) {
+            out.push(new docx.Paragraph({
+                children: [new docx.TextRun({ text: 'Feedback / Solution:', bold: true, size: 20 })],
+                spacing: { after: 50 }
+            }));
+            out.push(new docx.Paragraph({
+                children: [new docx.TextRun({ text: q.feedbackText, size: 20 })],
+                indent: { left: 400 },
+                spacing: { after: 120 }
+            }));
+        }
+        return out;
+    }
+
+    async generateQuestionSheet(examName, questions, points, exSelectedAll = [], pdfNonMcSelected = [], wordNonMcSelected = []) {
         // 所有內容將添加到同一個 section，確保連續流動
         const allChildren = [];
 
@@ -2248,9 +2397,50 @@ class WordGenerator {
             });
         }
 
+        // PDF Non-MC 區塊（題目卷只保留 prompt + required）
+        if (pdfNonMcSelected && pdfNonMcSelected.length > 0) {
+            const sectionTitle = currentSubject === 'financial' ? 'II. PROBLEMS' : 'III. PDF NON-MC PROBLEMS';
+            allChildren.push(
+                new docx.Paragraph({
+                    children: [
+                        new docx.TextRun({
+                            text: sectionTitle,
+                            bold: true,
+                            size: 22
+                        })
+                    ],
+                    spacing: { before: 400, after: 200 }
+                })
+            );
+            const baseNumber = questions.length;
+            pdfNonMcSelected.forEach((q, idx) => {
+                const clean = this.sanitizePdfNonMcForQuestionSheet(q);
+                const displayNumber = baseNumber + idx + 1;
+                allChildren.push(
+                    new docx.Paragraph({
+                        children: [new docx.TextRun({ text: `${displayNumber}. ${clean.promptText}`, size: 22 })],
+                        spacing: { before: idx === 0 ? 0 : 250, after: 100 }
+                    })
+                );
+                if (clean.requiredText) {
+                    allChildren.push(
+                        new docx.Paragraph({
+                            children: [new docx.TextRun({ text: 'Required:', bold: true, size: 20 })],
+                            spacing: { after: 50 }
+                        }),
+                        new docx.Paragraph({
+                            children: [new docx.TextRun({ text: clean.requiredText, size: 20 })],
+                            indent: { left: 400 },
+                            spacing: { after: 100 }
+                        })
+                    );
+                }
+            });
+        }
+
         // Word / Financial Non-MC 區塊插入點
         if (wordNonMcSelected && wordNonMcSelected.length > 0) {
-            if (currentSubject === 'financial') {
+            if (currentSubject === 'financial' && (!pdfNonMcSelected || pdfNonMcSelected.length === 0)) {
                 allChildren.push(
                     new docx.Paragraph({
                         children: [
@@ -2289,7 +2479,7 @@ class WordGenerator {
     }
 
     // 生成答案卷（教師用）
-    async generateAnswerSheet(examName, questions, exSelectedAll = [], wordNonMcSelected = []) {
+    async generateAnswerSheet(examName, questions, exSelectedAll = [], pdfNonMcSelected = [], wordNonMcSelected = []) {
         // 所有內容將添加到同一個 section，確保連續流動
         const allChildren = [];
         
@@ -2669,6 +2859,21 @@ class WordGenerator {
                     })
                 );
             });
+        }
+
+        // PDF Non-MC 區塊（答案卷要顯示完整題目 + 答案）
+        if (pdfNonMcSelected && pdfNonMcSelected.length > 0) {
+            answerChildren.push(
+                new docx.Paragraph({
+                    children: [new docx.TextRun({ text: 'PDF NON-MC ANSWERS', bold: true, size: 22 })],
+                    spacing: { before: 400, after: 200 }
+                })
+            );
+            const baseNumber = questions.length;
+            for (let i = 0; i < pdfNonMcSelected.length; i++) {
+                const displayNumber = baseNumber + i + 1;
+                answerChildren.push(...this.renderPdfNonMcAnswerBlock(pdfNonMcSelected[i], displayNumber));
+            }
         }
 
         // Word 非選擇題區塊（僅 Managerial，放在 EX 之後）：不輸出標題，只保留 marker 段落供 inject 插入
@@ -3190,12 +3395,14 @@ function updateFileList() {
             const mcAvailable = item.questions.length; // 維持既有：questions === MC
             const exAvailable = (item.exQuestions && item.exQuestions.length) ? item.exQuestions.length : 0;
             const exRequested = (parseInt(exRequestedCountsByFileIndex[index], 10) || 0);
+            const pdfNonMcAvailable = (item.pdfNonMcQuestions && item.pdfNonMcQuestions.length) ? item.pdfNonMcQuestions.length : 0;
+            const pdfNonMcRequested = (parseInt(pdfNonMcRequestedCountsByFileIndex[index], 10) || 0);
             const fileItem = document.createElement('div');
             fileItem.className = 'file-item';
             fileItem.innerHTML = `
                 <div style="flex: 1;">
                     <span class="file-name">${item.fileName}</span>
-                    <span style="color: #888; font-size: 12px; margin-left: 10px;">（MC 可用：${mcAvailable} 題 / EX 可用：${exAvailable} 題）</span>
+                    <span style="color: #888; font-size: 12px; margin-left: 10px;">（MC 可用：${mcAvailable} 題 / EX 可用：${exAvailable} 題 / NON-MC 可用：${pdfNonMcAvailable} 題）</span>
                 </div>
                 <div style="display: flex; align-items: center; gap: 10px;">
                     <label style="font-size: 14px; color: #555;">MC：</label>
@@ -3216,6 +3423,15 @@ function updateFileList() {
                            step="1"
                            value="${exRequested}" 
                            style="width: 60px; padding: 5px; border: 2px solid #ddd; border-radius: 4px; text-align: center;">
+                    <label style="font-size: 14px; color: #555;">NON-MC：</label>
+                    <input type="number" 
+                           id="pdfNonMcCount_${index}" 
+                           class="question-count-input" 
+                           min="0" 
+                           max="${pdfNonMcAvailable}"
+                           step="1"
+                           value="${pdfNonMcRequested}" 
+                           style="width: 60px; padding: 5px; border: 2px solid #ddd; border-radius: 4px; text-align: center;">
                     <button class="file-remove" onclick="removeFile(${index})">移除</button>
                 </div>
             `;
@@ -3234,6 +3450,19 @@ function updateFileList() {
                 };
                 exInput.addEventListener('input', clampAndStore);
                 exInput.addEventListener('change', clampAndStore);
+            }
+            const nonMcInput = document.getElementById(`pdfNonMcCount_${index}`);
+            if (nonMcInput) {
+                const clampAndStoreNonMc = () => {
+                    let v = parseInt(nonMcInput.value, 10);
+                    if (isNaN(v)) v = 0;
+                    if (v < 0) v = 0;
+                    if (v > pdfNonMcAvailable) v = pdfNonMcAvailable;
+                    nonMcInput.value = String(v);
+                    pdfNonMcRequestedCountsByFileIndex[index] = v;
+                };
+                nonMcInput.addEventListener('input', clampAndStoreNonMc);
+                nonMcInput.addEventListener('change', clampAndStoreNonMc);
             }
         });
     } else {
@@ -3262,12 +3491,17 @@ window.removeFile = function(index) {
     if (exRequestedCountsByFileIndex.length > index) {
         exRequestedCountsByFileIndex.splice(index, 1);
     }
+    if (pdfNonMcRequestedCountsByFileIndex.length > index) {
+        pdfNonMcRequestedCountsByFileIndex.splice(index, 1);
+    }
     updateFileList();
     parsedQuestions = [];
     parsedExerciseQuestions = [];
+    parsedPdfNonMcQuestions = [];
     if (pdfFiles.length === 0) {
         parsedQuestionsByFile = [];
         exRequestedCountsByFileIndex = [];
+        pdfNonMcRequestedCountsByFileIndex = [];
     }
     parseSection.style.display = 'none';
     generateSection.style.display = 'none';
@@ -3324,13 +3558,15 @@ async function parsePDFs() {
         parsedQuestions = parseResult.allQuestions;
         parsedQuestionsByFile = parseResult.byFile;
         parsedExerciseQuestions = parseResult.allExQuestions || [];
-        // 對齊每檔案的 EX requested state（預設 0）
+        parsedPdfNonMcQuestions = parseResult.allPdfNonMcQuestions || [];
+        // 對齊每檔案 requested state（預設 0）
         exRequestedCountsByFileIndex = parsedQuestionsByFile.map((_, i) => (parseInt(exRequestedCountsByFileIndex[i], 10) || 0));
+        pdfNonMcRequestedCountsByFileIndex = parsedQuestionsByFile.map((_, i) => (parseInt(pdfNonMcRequestedCountsByFileIndex[i], 10) || 0));
         
-        if (parsedQuestions.length === 0) {
+        if (parsedQuestions.length === 0 && parsedPdfNonMcQuestions.length === 0) {
             var msg = currentSubject === 'financial'
-                ? '未能從 PDF 中提取到任何 Financial 題目（請確認為 McGraw-Hill Connect Print View 格式）。'
-                : '未能從 PDF 中提取到任何 MC 題目。請確認 PDF 格式正確。';
+                ? '未能從 PDF 中提取到任何 Financial 題目（MC / Non-MC）。'
+                : '未能從 PDF 中提取到任何題目。請確認 PDF 格式正確。';
             parseStatus.innerHTML = '<div class="status error">' + msg + '</div>';
             updateExportButton();
             return;
@@ -3339,14 +3575,17 @@ async function parsePDFs() {
         // 顯示解析結果（按檔案分組）
         const totalMC = parsedQuestions.length;
         const totalEX = parsedQuestionsByFile.reduce((sum, it) => sum + ((it.exQuestions && it.exQuestions.length) ? it.exQuestions.length : 0), 0);
+        const totalPdfNonMc = parsedQuestionsByFile.reduce((sum, it) => sum + ((it.pdfNonMcQuestions && it.pdfNonMcQuestions.length) ? it.pdfNonMcQuestions.length : 0), 0);
         let infoHTML = `<h3>解析完成！</h3><ul>`;
         infoHTML += `<li>總共找到 <strong>${totalMC}</strong> 題 MC 題目</li>`;
         infoHTML += `<li>總共找到 <strong>${totalEX}</strong> 題 EX（非選擇題）</li>`;
+        infoHTML += `<li>總共找到 <strong>${totalPdfNonMc}</strong> 題 PDF Non-MC 題目</li>`;
         infoHTML += `<li>檔案數量：<strong>${parsedQuestionsByFile.length}</strong> 個</li>`;
         parsedQuestionsByFile.forEach((item, index) => {
             const mcCount = (item.mcQuestions ? item.mcQuestions.length : item.questions.length);
             const exCount = (item.exQuestions ? item.exQuestions.length : 0);
-            infoHTML += `<li>${item.fileName}: MC ${mcCount} 題 / EX ${exCount} 題</li>`;
+            const pdfNonMcCount = (item.pdfNonMcQuestions ? item.pdfNonMcQuestions.length : 0);
+            infoHTML += `<li>${item.fileName}: MC ${mcCount} 題 / EX ${exCount} 題 / PDF Non-MC ${pdfNonMcCount} 題</li>`;
         });
         infoHTML += `</ul>`;
         parsedQuestionsDiv.innerHTML = infoHTML;
@@ -3419,6 +3658,23 @@ generateBtn.addEventListener('click', async () => {
         }
         
         exRequestedCountsByFileIndex[i] = exRequested;
+
+        const pdfNonMcInput = document.getElementById(`pdfNonMcCount_${i}`);
+        const pdfNonMcRequested = parseInt(pdfNonMcInput ? pdfNonMcInput.value : 0, 10) || 0;
+        const pdfNonMcAvailable = (parsedQuestionsByFile[i].pdfNonMcQuestions && parsedQuestionsByFile[i].pdfNonMcQuestions.length)
+            ? parsedQuestionsByFile[i].pdfNonMcQuestions.length
+            : 0;
+        if (pdfNonMcRequested < 0) {
+            hasError = true;
+            errorMessage = `${parsedQuestionsByFile[i].fileName}: PDF NON-MC 題目數不能為負數`;
+            break;
+        }
+        if (pdfNonMcRequested > pdfNonMcAvailable) {
+            hasError = true;
+            errorMessage = `${parsedQuestionsByFile[i].fileName}: PDF NON-MC 請求 ${pdfNonMcRequested} 題，但只有 ${pdfNonMcAvailable} 題可用`;
+            break;
+        }
+        pdfNonMcRequestedCountsByFileIndex[i] = pdfNonMcRequested;
         
         if (requestedCount < 0) {
             hasError = true;
@@ -3437,10 +3693,12 @@ generateBtn.addEventListener('click', async () => {
             fileName: parsedQuestionsByFile[i].fileName,
             requestedCount: requestedCount,
             availableCount: availableCount,
-            questions: parsedQuestionsByFile[i].questions
+            questions: parsedQuestionsByFile[i].questions,
+            pdfNonMcRequestedCount: pdfNonMcRequested,
+            pdfNonMcQuestions: parsedQuestionsByFile[i].pdfNonMcQuestions || []
         });
         
-        totalSelected += requestedCount;
+        totalSelected += requestedCount + pdfNonMcRequested;
     }
 
     // Word 非選擇題驗證（僅 Managerial，且已上傳 Word 時）：總抽題數 = 每檔 requestedCount 加總
@@ -3460,7 +3718,7 @@ generateBtn.addEventListener('click', async () => {
     const wordSumRequested = wordDocs.length > 0 ? wordDocs.reduce((s, d) => s + (d.requestedCount || 0), 0) : 0;
     const hasWordOnly = currentSubject === 'managerial' && wordDocs.length > 0 && wordSumRequested > 0;
     if (totalSelected === 0 && !hasWordOnly) {
-        generateStatus.innerHTML = '<div class="status error">請至少為一個檔案設定大於 0 的題目數（PDF 或 Word Non-MC）</div>';
+        generateStatus.innerHTML = '<div class="status error">請至少為一個檔案設定大於 0 的題目數（PDF MC / PDF NON-MC / Word Non-MC）</div>';
         return;
     }
 
@@ -3515,6 +3773,28 @@ generateBtn.addEventListener('click', async () => {
             }
         }
 
+        // PDF NON-MC 抽題：每檔各自抽 requestedCount，合併後再 shuffle
+        let pdfNonMcSelected = [];
+        const pdfNonMcSelectedByFile = [];
+        for (let i = 0; i < questionCounts.length; i++) {
+            const fileReq = questionCounts[i].pdfNonMcRequestedCount || 0;
+            const fileAvail = questionCounts[i].pdfNonMcQuestions || [];
+            if (fileReq > 0 && fileAvail.length > 0) {
+                const selected = generator.randomSelect(fileAvail, fileReq);
+                pdfNonMcSelectedByFile.push(...selected);
+            }
+            console.log('[Generate][ByFile]', {
+                fileName: questionCounts[i].fileName,
+                mcRequested: questionCounts[i].requestedCount,
+                exRequested: exRequestedCountsByFileIndex[i] || 0,
+                pdfNonMcRequested: fileReq,
+                wordNonMcRequested: (wordDocs[i] && wordDocs[i].requestedCount) ? wordDocs[i].requestedCount : 0
+            });
+        }
+        if (pdfNonMcSelectedByFile.length > 0) {
+            pdfNonMcSelected = generator.shuffle(pdfNonMcSelectedByFile);
+        }
+
         // Word / Financial Non-MC 抽題：每檔各自抽 requestedCount，合併後再 shuffle
         let wordNonMcSelected = [];
         if (wordParseState === 'parsed' && wordDocs.length > 0) {
@@ -3533,16 +3813,23 @@ generateBtn.addEventListener('click', async () => {
         }
 
         // 讀取 Exam Points（Managerial / Financial 皆使用正式 cover page）
+        console.log('[Generate] selection summary', {
+            mc: examQuestions.length,
+            ex: exSelectedAll.length,
+            pdfNonMc: pdfNonMcSelected.length,
+            wordNonMc: wordNonMcSelected.length
+        });
+
         const examPoints = readExamPointsFromUI();
         
         // 生成 Word 文檔
         const wordGen = new WordGenerator();
         
         console.log('Generating Questions doc...');
-        let questionBlob = await wordGen.generateQuestionSheet(examName, examQuestions, examPoints, exSelectedAll, wordNonMcSelected);
+        let questionBlob = await wordGen.generateQuestionSheet(examName, examQuestions, examPoints, exSelectedAll, pdfNonMcSelected, wordNonMcSelected);
         if (wordNonMcSelected.length > 0) {
             if (currentSubject === 'financial') {
-                questionBlob = await injectFinancialNonMcIntoQuestionsDocx(questionBlob, wordNonMcSelected, examQuestions.length);
+                questionBlob = await injectFinancialNonMcIntoQuestionsDocx(questionBlob, wordNonMcSelected, examQuestions.length + pdfNonMcSelected.length);
             } else {
                 questionBlob = await injectNonMcIntoQuestionsDocx(questionBlob, wordNonMcSelected, wordDocxZip);
             }
@@ -3550,10 +3837,10 @@ generateBtn.addEventListener('click', async () => {
         console.log('Questions doc generated');
         
         console.log('Generating Answers doc...');
-        let answerBlob = await wordGen.generateAnswerSheet(examName, examQuestions, exSelectedAll, wordNonMcSelected);
+        let answerBlob = await wordGen.generateAnswerSheet(examName, examQuestions, exSelectedAll, pdfNonMcSelected, wordNonMcSelected);
         if (wordNonMcSelected.length > 0) {
             if (currentSubject === 'financial') {
-                answerBlob = await injectFinancialNonMcIntoAnswersDocx(answerBlob, wordNonMcSelected, examQuestions.length);
+                answerBlob = await injectFinancialNonMcIntoAnswersDocx(answerBlob, wordNonMcSelected, examQuestions.length + pdfNonMcSelected.length);
             } else {
                 answerBlob = await injectNonMcIntoAnswersDocx(answerBlob, wordNonMcSelected, wordDocxZip);
             }
