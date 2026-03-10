@@ -321,36 +321,63 @@ class PDFParser {
         return (hasRequired || hasSolutionLike || hasLongNarrative) && optionTokenCount < 2;
     }
 
+    cleanFinancialNonMcMultilineText(text) {
+        const normalized = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const lines = normalized.split('\n').map(line => line.trim());
+        const out = [];
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (!line) {
+                if (out.length > 0 && out[out.length - 1] !== '') out.push('');
+                continue;
+            }
+            if (/^Required\s+\d+\s+Required\s+\d+$/i.test(line)) continue;
+            if (/^Required\s+\d+$/i.test(line) && i + 1 < lines.length && /^Required\s+\d+$/i.test(lines[i + 1])) continue;
+            out.push(line);
+        }
+        while (out.length && out[0] === '') out.shift();
+        while (out.length && out[out.length - 1] === '') out.pop();
+        return out.join('\n');
+    }
+
+    renderMultilineTextAsParagraphs(text, paragraphOptions = {}) {
+        const normalized = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        return normalized.split('\n').map(line => new docx.Paragraph({
+            children: line ? [new docx.TextRun({ text: line, size: 20 })] : [],
+            ...paragraphOptions
+        }));
+    }
+
     splitFinancialNonMcBody(bodyText) {
         let promptText = '';
         let requiredText = '';
         let answerText = '';
         let feedbackText = '';
-        let working = String(bodyText || '').trim();
+        let working = this.cleanFinancialNonMcMultilineText(bodyText);
 
-        const requiredMatch = working.match(/\bRequired\s*:/i);
+        const requiredMatch = working.match(/\bRequired\s*[:：]/i);
         if (requiredMatch && requiredMatch.index != null) {
-            promptText = working.substring(0, requiredMatch.index).trim();
+            promptText = this.cleanFinancialNonMcMultilineText(working.substring(0, requiredMatch.index));
             working = working.substring(requiredMatch.index).trim();
         }
 
         const answerMatch = working.match(/\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]/i);
         if (answerMatch && answerMatch.index != null) {
             const requiredBlock = working.substring(0, answerMatch.index).trim();
-            requiredText = requiredBlock.replace(/^Required\s*[:：]?\s*/i, '').trim();
+            requiredText = this.cleanFinancialNonMcMultilineText(requiredBlock.replace(/^Required\s*[:：]?\s*/i, ''));
             working = working.substring(answerMatch.index).trim();
         } else {
-            requiredText = working.replace(/^Required\s*[:：]?\s*/i, '').trim();
+            requiredText = this.cleanFinancialNonMcMultilineText(working.replace(/^Required\s*[:：]?\s*/i, ''));
             working = '';
         }
 
         if (working) {
             const feedbackMatch = working.match(/\bFeedback\s*[:：]/i);
             if (feedbackMatch && feedbackMatch.index != null) {
-                answerText = working.substring(0, feedbackMatch.index).replace(/^\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, '').trim();
-                feedbackText = working.substring(feedbackMatch.index).replace(/^Feedback\s*[:：]?\s*/i, '').trim();
+                answerText = this.cleanFinancialNonMcMultilineText(working.substring(0, feedbackMatch.index).replace(/^\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, ''));
+                feedbackText = this.cleanFinancialNonMcMultilineText(working.substring(feedbackMatch.index).replace(/^Feedback\s*[:：]?\s*/i, ''));
             } else {
-                answerText = working.replace(/^\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, '').trim();
+                answerText = this.cleanFinancialNonMcMultilineText(working.replace(/^\b(?:Solution|Explanation|Answer|Correct\s+Answer)\s*[:：]?\s*/i, ''));
             }
         }
 
@@ -367,7 +394,7 @@ class PDFParser {
         const cleanedLines = this.removeFinancialNoiseLines(normalizedLines);
         if (!this.shouldTreatFinancialPageAsNonMc(cleanedLines)) return null;
 
-        const rawBlockText = cleanedLines.join('\n').trim();
+        const rawBlockText = this.cleanFinancialNonMcMultilineText(cleanedLines.join('\n'));
         if (!rawBlockText) return null;
 
         const parsed = this.splitFinancialNonMcBody(rawBlockText);
@@ -2038,8 +2065,8 @@ class WordGenerator {
         const q = question || {};
         return {
             originalId: q.originalId || '',
-            promptText: (q.promptText || '').trim(),
-            requiredText: (q.requiredText || '').trim(),
+            promptText: this.cleanFinancialNonMcMultilineText(q.promptText || ''),
+            requiredText: this.cleanFinancialNonMcMultilineText(q.requiredText || ''),
             sourcePage: q.sourcePage || ''
         };
     }
@@ -2056,8 +2083,7 @@ class WordGenerator {
                 children: [new docx.TextRun({ text: 'Required:', bold: true, size: 20 })],
                 spacing: { after: 50 }
             }));
-            out.push(new docx.Paragraph({
-                children: [new docx.TextRun({ text: q.requiredText, size: 20 })],
+            out.push(...this.renderMultilineTextAsParagraphs(this.cleanFinancialNonMcMultilineText(q.requiredText), {
                 indent: { left: 400 },
                 spacing: { after: 100 }
             }));
@@ -2067,8 +2093,7 @@ class WordGenerator {
                 children: [new docx.TextRun({ text: 'Answer:', bold: true, size: 20 })],
                 spacing: { after: 50 }
             }));
-            out.push(new docx.Paragraph({
-                children: [new docx.TextRun({ text: q.answerText, size: 20 })],
+            out.push(...this.renderMultilineTextAsParagraphs(this.cleanFinancialNonMcMultilineText(q.answerText), {
                 indent: { left: 400 },
                 spacing: { after: 100 }
             }));
@@ -2078,8 +2103,7 @@ class WordGenerator {
                 children: [new docx.TextRun({ text: 'Feedback / Solution:', bold: true, size: 20 })],
                 spacing: { after: 50 }
             }));
-            out.push(new docx.Paragraph({
-                children: [new docx.TextRun({ text: q.feedbackText, size: 20 })],
+            out.push(...this.renderMultilineTextAsParagraphs(this.cleanFinancialNonMcMultilineText(q.feedbackText), {
                 indent: { left: 400 },
                 spacing: { after: 120 }
             }));
@@ -2445,13 +2469,12 @@ class WordGenerator {
                         new docx.Paragraph({
                             children: [new docx.TextRun({ text: 'Required:', bold: true, size: 20 })],
                             spacing: { after: 50 }
-                        }),
-                        new docx.Paragraph({
-                            children: [new docx.TextRun({ text: clean.requiredText, size: 20 })],
-                            indent: { left: 400 },
-                            spacing: { after: 100 }
                         })
                     );
+                    allChildren.push(...this.renderMultilineTextAsParagraphs(clean.requiredText, {
+                        indent: { left: 400 },
+                        spacing: { after: 100 }
+                    }));
                 }
             });
         }
