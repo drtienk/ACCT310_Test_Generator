@@ -311,26 +311,16 @@ class PDFParser {
         return out;
     }
 
-    isFinancialMcExplanationStart(line, optionCountSoFar) {
+    isFinancialMcExplanationStart(line) {
         const text = String(line == null ? '' : line).replace(/\s+/g, ' ').trim();
-        const optionCount = Number(optionCountSoFar || 0);
-        if (!text || optionCount < 2) return false;
-
+        if (!text) return false;
+        if (/^The\s+/i.test(text)) return true;
         if (/^(Explanation|Feedback|Solution|Correct\s+Answer|Answer)\b/i.test(text)) return true;
-        if (/^(The|Because|Therefore|Thus|So)\b/i.test(text)) return true;
-        if (/^Focusing\s+on\b/i.test(text)) return true;
-        if (/^Face\s+amount\b/i.test(text)) return true;
-        if (/^Maturity\s+value\b/i.test(text)) return true;
-        if (/^Discount\b/i.test(text)) return true;
-        if (/^All of the answers\b/i.test(text)) return true;
+        if (/^\$[\d,]+/.test(text)) return true;
+        if (/^\(?\d+%/.test(text)) return true;
 
-        if (/[=×÷]/.test(text)) return true;
-        if (/(interest to maturity|maturity value|discount|expected value|allowance account|bad debt expense)/i.test(text)) return true;
-
-        if (text.length > 45 && /(because|consistent|separately identifiable|calculated|equals|indicates|therefore|under|account|expense|value)/i.test(text)) {
-            return true;
-        }
-
+        const narrativeSignals = /(because|calculated|equals|is one of|is not|indicates|under|therefore)/i;
+        if (text.length >= 60 && narrativeSignals.test(text)) return true;
         return false;
     }
 
@@ -489,8 +479,7 @@ class PDFParser {
                 questionLines.push(line);
             } else {
                 if (currentOptionLine != null) {
-                    var optionCountSoFar = optionLines.length + (currentOptionLine != null ? 1 : 0);
-                    if (this.isFinancialMcExplanationStart(line, optionCountSoFar)) {
+                    if (this.isFinancialMcExplanationStart(line)) {
                         optionLines.push(currentOptionLine.trim());
                         currentOptionLine = null;
                         reachedAfterOptions = true;
