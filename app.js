@@ -311,6 +311,19 @@ class PDFParser {
         return out;
     }
 
+    isFinancialMcExplanationStart(line) {
+        const text = String(line == null ? '' : line).replace(/\s+/g, ' ').trim();
+        if (!text) return false;
+        if (/^The\s+/i.test(text)) return true;
+        if (/^(Explanation|Feedback|Solution|Correct\s+Answer|Answer)\b/i.test(text)) return true;
+        if (/^\$[\d,]+/.test(text)) return true;
+        if (/^\(?\d+%/.test(text)) return true;
+
+        const narrativeSignals = /(because|calculated|equals|is one of|is not|indicates|under|therefore)/i;
+        if (text.length >= 60 && narrativeSignals.test(text)) return true;
+        return false;
+    }
+
     shouldTreatFinancialPageAsNonMc(lines) {
         if (!lines || lines.length < 2) return false;
         const text = lines.join('\n');
@@ -443,11 +456,17 @@ class PDFParser {
 
         var questionLines = [];
         var optionLines = [];
+        var afterOptionsLines = [];
         var foundFirstOption = false;
         var currentOptionLine = null;
+        var reachedAfterOptions = false;
 
         for (var i = 0; i < questionContent.length; i++) {
             var line = questionContent[i];
+            if (reachedAfterOptions) {
+                afterOptionsLines.push(line);
+                continue;
+            }
             var hasCircle = line.indexOf(CIRCLE) !== -1;
             var hasArrow = line.indexOf(ARROW) !== -1;
             if (hasCircle || (hasArrow && foundFirstOption)) {
@@ -460,7 +479,14 @@ class PDFParser {
                 questionLines.push(line);
             } else {
                 if (currentOptionLine != null) {
-                    currentOptionLine += ' ' + line;
+                    if (this.isFinancialMcExplanationStart(line)) {
+                        optionLines.push(currentOptionLine.trim());
+                        currentOptionLine = null;
+                        reachedAfterOptions = true;
+                        afterOptionsLines.push(line);
+                    } else {
+                        currentOptionLine += ' ' + line;
+                    }
                 }
             }
         }
@@ -528,26 +554,17 @@ class PDFParser {
             console.warn('[Financial][' + fileBaseName + '][p' + pageNum + '] 未找到答案標記，使用保底答案 a');
         }
 
-        var lastOptionIdx = -1;
-        for (var i = 0; i < questionContent.length; i++) {
-            if (questionContent[i].indexOf(CIRCLE) !== -1) {
-                lastOptionIdx = i;
-            }
-        }
-
         var feedbackLines = [];
-        if (lastOptionIdx >= 0) {
-            for (var i = lastOptionIdx + 1; i < questionContent.length; i++) {
-                var line = questionContent[i].trim();
-                if (!line) continue;
-                if (line.indexOf(CIRCLE) !== -1 || line.indexOf(ARROW) !== -1) continue;
-                if (/^(References|Multiple Choice)$/i.test(line)) continue;
-                if (/^revision\s*:/i.test(line)) continue;
-                if (/^Question\s+\d+/i.test(line)) continue;
-                var cleaned = this.cleanFinancialFeedbackLine(line);
-                if (cleaned) {
-                    feedbackLines.push(cleaned);
-                }
+        for (var i = 0; i < afterOptionsLines.length; i++) {
+            var line = afterOptionsLines[i].trim();
+            if (!line) continue;
+            if (line.indexOf(CIRCLE) !== -1 || line.indexOf(ARROW) !== -1) continue;
+            if (/^(References|Multiple Choice)$/i.test(line)) continue;
+            if (/^revision\s*:/i.test(line)) continue;
+            if (/^Question\s+\d+/i.test(line)) continue;
+            var cleaned = this.cleanFinancialFeedbackLine(line);
+            if (cleaned) {
+                feedbackLines.push(cleaned);
             }
         }
         var feedbackText = feedbackLines.join(' ').trim();
