@@ -511,6 +511,23 @@ class PDFParser {
             optText = optText.trim();
 
             var letter = String.fromCharCode(97 + i);
+
+            if (letter === 'd') {
+
+                // case 1: numeric answer
+                var numMatch = optText.match(/^(\(?\$?\d[\d,]*(?:\.\d+)?\)?)/);
+                if (numMatch) {
+                    optText = numMatch[1];
+                } 
+                else {
+                    // case 2: textual answer -> keep only first sentence
+                    var sentenceMatch = optText.match(/^([^\.]+\.)/);
+                    if (sentenceMatch) {
+                        optText = sentenceMatch[1];
+                    }
+                }
+            }
+
             options.push(letter + '. ' + optText);
         }
 
