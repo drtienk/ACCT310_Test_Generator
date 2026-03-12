@@ -412,10 +412,29 @@ class PDFParser {
         const cleanedLines = this.removeFinancialNoiseLines(normalizedLines);
         if (!this.shouldTreatFinancialPageAsNonMc(cleanedLines)) return null;
 
-        const rawBlockText = this.cleanFinancialNonMcMultilineText(cleanedLines.join('\n'));
+        const awardIdx = this.findFinancialStartIndex(cleanedLines);
+        const contentLines = awardIdx >= 0 ? cleanedLines.slice(awardIdx + 1) : cleanedLines.slice();
+        const rawBlockText = this.cleanFinancialNonMcMultilineText(contentLines.join('\n'));
         if (!rawBlockText) return null;
 
-        const parsed = this.splitFinancialNonMcBody(rawBlockText);
+        const questionOnlyLines = [];
+        for (let i = 0; i < contentLines.length; i++) {
+            const line = String(contentLines[i] == null ? '' : contentLines[i]).trim();
+            if (!line) continue;
+            if (/^Complete this question by entering your answers/i.test(line)) break;
+            if (/^Explanation\s*[:?]?/i.test(line)) break;
+            if (/^References$/i.test(line)) break;
+            if (/^rev\s*:/i.test(line)) break;
+            if (/^General$/i.test(line)) break;
+            if (/^Journal$/i.test(line)) break;
+            if (/^Number of performance obligations\b/i.test(line)) break;
+            if (/^Previous\s+Next$/i.test(line)) continue;
+            if (/^Required\s+\d+(?:\s+Required\s+\d+)*$/i.test(line)) continue;
+            questionOnlyLines.push(line);
+        }
+
+        const parsed = this.splitFinancialNonMcBody(this.cleanFinancialNonMcMultilineText(questionOnlyLines.join('\n')));
+        const answerParsed = this.splitFinancialNonMcBody(rawBlockText);
         if (!parsed.promptText && !parsed.requiredText) return null;
 
         return {
@@ -423,8 +442,8 @@ class PDFParser {
             type: 'PDF_NON_MC',
             promptText: parsed.promptText,
             requiredText: parsed.requiredText,
-            answerText: parsed.answerText,
-            feedbackText: parsed.feedbackText,
+            answerText: answerParsed.answerText,
+            feedbackText: answerParsed.feedbackText,
             rawBlockText: rawBlockText,
             sourceFileName: sourceFileName || '',
             sourcePage: pageNum
