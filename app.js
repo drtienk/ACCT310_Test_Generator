@@ -237,7 +237,12 @@ class PDFParser {
 
     normalizeFinancialLines(rawLines) {
         return (rawLines || [])
-            .map(function(l) { return String(l == null ? '' : l).replace(/\s+/g, ' ').trim(); })
+            .map(function(l) {
+                return String(l == null ? '' : l)
+                    .replace(/\s+/g, ' ')
+                    .replace(/([A-Za-z])\s+fi\s+([A-Za-z])/g, '$1fi$2')
+                    .trim();
+            })
             .filter(function(l) { return l.length > 0; });
     }
 
