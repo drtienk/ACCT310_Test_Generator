@@ -2104,8 +2104,8 @@ class WordGenerator {
         const q = question || {};
         return {
             originalId: q.originalId || '',
-            promptText: this.cleanFinancialNonMcMultilineText(q.promptText || ''),
-            requiredText: this.cleanFinancialNonMcMultilineText(q.requiredText || ''),
+            promptText: parser.cleanFinancialNonMcMultilineText(q.promptText || ''),
+            requiredText: parser.cleanFinancialNonMcMultilineText(q.requiredText || ''),
             sourcePage: q.sourcePage || ''
         };
     }
@@ -2122,7 +2122,7 @@ class WordGenerator {
                 children: [new docx.TextRun({ text: 'Required:', bold: true, size: 20 })],
                 spacing: { after: 50 }
             }));
-            out.push(...this.renderMultilineTextAsParagraphs(this.cleanFinancialNonMcMultilineText(q.requiredText), {
+            out.push(...parser.renderMultilineTextAsParagraphs(parser.cleanFinancialNonMcMultilineText(q.requiredText), {
                 indent: { left: 400 },
                 spacing: { after: 100 }
             }));
@@ -2132,7 +2132,7 @@ class WordGenerator {
                 children: [new docx.TextRun({ text: 'Answer:', bold: true, size: 20 })],
                 spacing: { after: 50 }
             }));
-            out.push(...this.renderMultilineTextAsParagraphs(this.cleanFinancialNonMcMultilineText(q.answerText), {
+            out.push(...parser.renderMultilineTextAsParagraphs(parser.cleanFinancialNonMcMultilineText(q.answerText), {
                 indent: { left: 400 },
                 spacing: { after: 100 }
             }));
@@ -2142,7 +2142,7 @@ class WordGenerator {
                 children: [new docx.TextRun({ text: 'Feedback / Solution:', bold: true, size: 20 })],
                 spacing: { after: 50 }
             }));
-            out.push(...this.renderMultilineTextAsParagraphs(this.cleanFinancialNonMcMultilineText(q.feedbackText), {
+            out.push(...parser.renderMultilineTextAsParagraphs(parser.cleanFinancialNonMcMultilineText(q.feedbackText), {
                 indent: { left: 400 },
                 spacing: { after: 120 }
             }));
@@ -2510,7 +2510,7 @@ class WordGenerator {
                             spacing: { after: 50 }
                         })
                     );
-                    allChildren.push(...this.renderMultilineTextAsParagraphs(clean.requiredText, {
+                    allChildren.push(...parser.renderMultilineTextAsParagraphs(clean.requiredText, {
                         indent: { left: 400 },
                         spacing: { after: 100 }
                     }));
