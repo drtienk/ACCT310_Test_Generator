@@ -417,20 +417,68 @@ class PDFParser {
         const rawBlockText = this.cleanFinancialNonMcMultilineText(contentLines.join('\n'));
         if (!rawBlockText) return null;
 
+        const normalizeLine = function(value) {
+            return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+        };
+        const isRequiredLabelLine = function(text) {
+            return /^Required\s*[:?]?$/i.test(text);
+        };
+        const isRequiredTabLine = function(text) {
+            return /^Required\s+\d+$/i.test(text);
+        };
+        const hasMultipleRequiredTabs = function(text) {
+            return /^(?:Required\s+\d+\s*){2,}$/i.test(text);
+        };
+        const isWorksheetNavLine = function(text) {
+            return /^Previous\s+Next$/i.test(text);
+        };
+        const isWorksheetInstructionLine = function(text) {
+            return /^Complete this question by entering your answers in the tabs below\.?$/i.test(text);
+        };
+        const isPostQuestionSectionLine = function(text) {
+            return /^(Explanation|Hints?|References?|Solution|Answer|Correct\s+Answer)\b\s*[:?]?/i.test(text);
+        };
+        const isNoteLine = function(text) {
+            return /^Note\s*:/i.test(text);
+        };
+        const isWorksheetTableHeaderLine = function(text) {
+            return /^(Ending|Date|Inventory Layers Converted to Base Year Cost|Inventory Layers Converted to Acquisition Year Cost|Inventory DVL Cost|Year-End Cost Index)\b/i.test(text);
+        };
+
         const questionOnlyLines = [];
+        let seenRequiredSection = false;
+        let lastKeptLine = '';
         for (let i = 0; i < contentLines.length; i++) {
-            const line = String(contentLines[i] == null ? '' : contentLines[i]).trim();
+            const line = normalizeLine(contentLines[i]);
+            const nextLine = normalizeLine(i + 1 < contentLines.length ? contentLines[i + 1] : '');
+            const prevLine = normalizeLine(i > 0 ? contentLines[i - 1] : '');
             if (!line) continue;
-            if (/^Complete this question by entering your answers/i.test(line)) break;
-            if (/^Explanation\s*[:?]?/i.test(line)) break;
-            if (/^References$/i.test(line)) break;
+
+            if (isRequiredLabelLine(line)) {
+                seenRequiredSection = true;
+                questionOnlyLines.push(line);
+                lastKeptLine = line;
+                continue;
+            }
+
+            if (seenRequiredSection) {
+                const startsWorksheetTabs =
+                    hasMultipleRequiredTabs(line) ||
+                    (isRequiredTabLine(line) && isRequiredTabLine(nextLine)) ||
+                    (isWorksheetNavLine(line) && (isRequiredTabLine(prevLine) || isRequiredTabLine(nextLine))) ||
+                    isWorksheetInstructionLine(line);
+                const startsWorksheetTableAfterNote =
+                    isWorksheetTableHeaderLine(line) &&
+                    (isNoteLine(lastKeptLine) || isWorksheetTableHeaderLine(nextLine));
+
+                if (startsWorksheetTabs) break;
+                if (startsWorksheetTableAfterNote) break;
+                if (isPostQuestionSectionLine(line)) break;
+            }
+
             if (/^rev\s*:/i.test(line)) break;
-            if (/^General$/i.test(line)) break;
-            if (/^Journal$/i.test(line)) break;
-            if (/^Number of performance obligations\b/i.test(line)) break;
-            if (/^Previous\s+Next$/i.test(line)) continue;
-            if (/^Required\s+\d+(?:\s+Required\s+\d+)*$/i.test(line)) continue;
             questionOnlyLines.push(line);
+            lastKeptLine = line;
         }
 
         const parsed = this.splitFinancialNonMcBody(this.cleanFinancialNonMcMultilineText(questionOnlyLines.join('\n')));
