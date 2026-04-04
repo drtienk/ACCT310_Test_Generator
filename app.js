@@ -597,7 +597,8 @@ class PDFParser {
         if (!this.shouldTreatFinancialPageAsNonMc(cleanedLines)) return null;
 
         const awardIdx = this.findFinancialStartIndex(cleanedLines);
-        const contentLines = awardIdx >= 0 ? cleanedLines.slice(awardIdx + 1) : cleanedLines.slice();
+        if (awardIdx < 0) return null;
+        const contentLines = cleanedLines.slice(awardIdx + 1);
         const rawBlockText = this.cleanFinancialNonMcMultilineText(contentLines.join('\n'));
         if (!rawBlockText) return null;
 
