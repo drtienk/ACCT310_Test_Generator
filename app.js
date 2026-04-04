@@ -366,6 +366,122 @@ class PDFParser {
         }));
     }
 
+    detectFinancialCompactSetupTable(questionOnlyLines) {
+        const normalizedLines = (questionOnlyLines || [])
+            .map(line => String(line == null ? '' : line).replace(/\s+/g, ' ').trim())
+            .filter(line => line.length > 0);
+
+        if (normalizedLines.length === 0) return null;
+
+        const joined = normalizedLines.join(' ').replace(/\s+/g, ' ').trim();
+        if (!joined) return null;
+
+        const normalizeMoney = (value) => String(value == null ? '' : value).replace(/\s+/g, '').trim();
+
+        const rowPattern = /\b(\d{4})\s+(\$?\s*[\d,]+(?:\.\d+)?)\s+(\$?\s*[\d,]+(?:\.\d+)?)\b/g;
+        const rowMatches = [...joined.matchAll(rowPattern)];
+
+        if (rowMatches.length < 2) return null;
+
+        const firstRow = rowMatches[0];
+        const lastRow = rowMatches[rowMatches.length - 1];
+        const prefix = joined.slice(0, firstRow.index).trim();
+
+        const hasYearEndHeader = /Ending Inventory at Year-End/i.test(prefix);
+        const hasBaseYearHeader = /Ending Inventory at Base Year/i.test(prefix);
+        const hasStandaloneYear = /(?:^|\s)Year(?:\s|$)/i.test(prefix);
+
+        if (!(hasYearEndHeader && hasBaseYearHeader && hasStandaloneYear)) {
+            return null;
+        }
+
+        let headerStart = -1;
+
+        const idxYearEnd = prefix.search(/Ending Inventory at Year-End/i);
+        const idxBaseYear = prefix.search(/Ending Inventory at Base Year/i);
+
+        const yearMatches = [...prefix.matchAll(/(?:^|\s)(Year)(?=\s|$)/ig)];
+        const idxStandaloneYear = yearMatches.length > 0
+            ? yearMatches[yearMatches.length - 1].index + (yearMatches[yearMatches.length - 1][0].startsWith(' ') ? 1 : 0)
+            : -1;
+
+        const headerCandidates = [idxYearEnd, idxBaseYear, idxStandaloneYear].filter(idx => idx >= 0);
+        if (headerCandidates.length === 0) return null;
+
+        headerStart = Math.min(...headerCandidates);
+
+        const beforeText = joined.slice(0, headerStart).trim();
+        const afterRowsText = joined.slice(lastRow.index + lastRow[0].length).trim();
+
+        const rows = [[
+            'Year',
+            'Ending Inventory at Year-End Costs',
+            'Ending Inventory at Base Year Costs'
+        ]];
+
+        rowMatches.forEach(match => {
+            rows.push([
+                match[1],
+                normalizeMoney(match[2]),
+                normalizeMoney(match[3])
+            ]);
+        });
+
+        if (rows.length < 3) return null;
+
+        return {
+            beforeText,
+            afterText: afterRowsText,
+            rows
+        };
+    }
+
+    buildFinancialQuestionSheetBlocks(questionOnlyLines) {
+        const lines = (questionOnlyLines || [])
+            .map(line => String(line == null ? '' : line).replace(/\s+/g, ' ').trim())
+            .filter(line => line.length > 0);
+
+        if (lines.length === 0) return null;
+
+        const requiredIndex = lines.findIndex(line => /^Required\s*[:?]?$/i.test(line));
+        const beforeRequired = requiredIndex >= 0 ? lines.slice(0, requiredIndex) : lines.slice();
+        const fromRequired = requiredIndex >= 0 ? lines.slice(requiredIndex) : [];
+
+        const tableMatch = this.detectFinancialCompactSetupTable(beforeRequired);
+
+        const blocks = [];
+        const pushParagraphBlock = (text) => {
+            const cleaned = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+            if (!cleaned) return;
+            blocks.push({ type: 'paragraph', text: cleaned });
+        };
+
+        if (!tableMatch) {
+            const parsed = this.splitFinancialNonMcBody(this.cleanFinancialNonMcMultilineText(lines.join('\n')));
+            if (parsed.promptText) {
+                pushParagraphBlock(parsed.promptText);
+            }
+            if (parsed.requiredText) {
+                pushParagraphBlock('Required:');
+                parsed.requiredText.split('\n').forEach(line => pushParagraphBlock(line));
+            }
+            return blocks.length > 0 ? blocks : null;
+        }
+
+        pushParagraphBlock(tableMatch.beforeText);
+
+        blocks.push({
+            type: 'table',
+            rows: tableMatch.rows
+        });
+
+        pushParagraphBlock(tableMatch.afterText);
+
+        fromRequired.forEach(line => pushParagraphBlock(line));
+
+        return blocks.length > 0 ? blocks : null;
+    }
+
     splitFinancialNonMcBody(bodyText) {
         let promptText = '';
         let requiredText = '';
@@ -481,6 +597,7 @@ class PDFParser {
             lastKeptLine = line;
         }
 
+        const questionSheetBlocks = this.buildFinancialQuestionSheetBlocks(questionOnlyLines);
         const parsed = this.splitFinancialNonMcBody(this.cleanFinancialNonMcMultilineText(questionOnlyLines.join('\n')));
         const answerParsed = this.splitFinancialNonMcBody(rawBlockText);
         if (!parsed.promptText && !parsed.requiredText) return null;
@@ -490,6 +607,7 @@ class PDFParser {
             type: 'PDF_NON_MC',
             promptText: parsed.promptText,
             requiredText: parsed.requiredText,
+            questionSheetBlocks: questionSheetBlocks,
             answerText: answerParsed.answerText,
             feedbackText: answerParsed.feedbackText,
             rawBlockText: rawBlockText,
@@ -2173,8 +2291,113 @@ class WordGenerator {
             originalId: q.originalId || '',
             promptText: parser.cleanFinancialNonMcMultilineText(q.promptText || ''),
             requiredText: parser.cleanFinancialNonMcMultilineText(q.requiredText || ''),
+            questionSheetBlocks: Array.isArray(q.questionSheetBlocks) ? q.questionSheetBlocks.map(block => {
+                if (!block || !block.type) return null;
+                if (block.type === 'paragraph') {
+                    return {
+                        type: 'paragraph',
+                        text: parser.cleanFinancialNonMcMultilineText(block.text || '')
+                    };
+                }
+                if (block.type === 'table' && Array.isArray(block.rows)) {
+                    return {
+                        type: 'table',
+                        rows: block.rows.map(row => Array.isArray(row) ? row.map(cell => String(cell == null ? '' : cell).replace(/\s+/g, ' ').trim()) : [])
+                    };
+                }
+                return null;
+            }).filter(Boolean) : null,
             sourcePage: q.sourcePage || ''
         };
+    }
+
+    renderPdfNonMcQuestionBlock(question, displayNumber, isFirstQuestion) {
+        const q = question || {};
+        const blocks = Array.isArray(q.questionSheetBlocks) ? q.questionSheetBlocks : null;
+        if (!blocks || blocks.length === 0) {
+            const out = [];
+            out.push(
+                new docx.Paragraph({
+                    children: [new docx.TextRun({ text: `${displayNumber}. ${q.promptText || ''}`, size: 22 })],
+                    spacing: { before: isFirstQuestion ? 0 : 250, after: 100 }
+                })
+            );
+            if (q.requiredText) {
+                out.push(
+                    new docx.Paragraph({
+                        children: [new docx.TextRun({ text: 'Required:', bold: true, size: 20 })],
+                        spacing: { after: 50 }
+                    })
+                );
+                out.push(...parser.renderMultilineTextAsParagraphs(q.requiredText, {
+                    indent: { left: 400 },
+                    spacing: { after: 100 }
+                }));
+            }
+            return out;
+        }
+
+        const out = [];
+        let usedQuestionNumber = false;
+        let inRequiredSection = false;
+        const tableBorder = (typeof docx.BorderStyle !== 'undefined')
+            ? { style: docx.BorderStyle.SINGLE, size: 4 }
+            : { size: 4 };
+
+        blocks.forEach((block, index) => {
+            if (block.type === 'paragraph') {
+                const text = String(block.text || '').trim();
+                if (!text) return;
+                const isRequiredLabel = /^Required\s*[:?]?$/i.test(text);
+                if (isRequiredLabel) inRequiredSection = true;
+                out.push(new docx.Paragraph({
+                    children: [new docx.TextRun({
+                        text: usedQuestionNumber ? text : `${displayNumber}. ${text}`,
+                        size: isRequiredLabel ? 20 : (usedQuestionNumber ? 20 : 22),
+                        bold: isRequiredLabel
+                    })],
+                    spacing: {
+                        before: (!usedQuestionNumber && isFirstQuestion) ? 0 : (index === 0 ? 0 : 100),
+                        after: isRequiredLabel ? 50 : 100
+                    },
+                    indent: usedQuestionNumber && inRequiredSection && !isRequiredLabel ? { left: 400 } : undefined
+                }));
+                usedQuestionNumber = true;
+                return;
+            }
+
+            if (block.type === 'table' && Array.isArray(block.rows) && block.rows.length > 0) {
+                out.push(new docx.Table({
+                    rows: block.rows.map((row, rowIndex) => new docx.TableRow({
+                        children: row.map(cell => new docx.TableCell({
+                            children: [
+                                new docx.Paragraph({
+                                    children: [
+                                        new docx.TextRun({
+                                            text: String(cell == null ? '' : cell),
+                                            size: 20,
+                                            bold: rowIndex === 0
+                                        })
+                                    ]
+                                })
+                            ]
+                        }))
+                    })),
+                    width: { size: 100, type: docx.WidthType.PERCENTAGE },
+                    borders: {
+                        top: tableBorder,
+                        bottom: tableBorder,
+                        left: tableBorder,
+                        right: tableBorder,
+                        insideHorizontal: tableBorder,
+                        insideVertical: tableBorder
+                    }
+                }));
+                usedQuestionNumber = true;
+            }
+        });
+
+        return out;
     }
 
     renderPdfNonMcAnswerBlock(question, displayNumber) {
@@ -2564,24 +2787,7 @@ class WordGenerator {
             pdfNonMcSelected.forEach((q, idx) => {
                 const clean = this.sanitizePdfNonMcForQuestionSheet(q);
                 const displayNumber = baseNumber + idx + 1;
-                allChildren.push(
-                    new docx.Paragraph({
-                        children: [new docx.TextRun({ text: `${displayNumber}. ${clean.promptText}`, size: 22 })],
-                        spacing: { before: idx === 0 ? 0 : 250, after: 100 }
-                    })
-                );
-                if (clean.requiredText) {
-                    allChildren.push(
-                        new docx.Paragraph({
-                            children: [new docx.TextRun({ text: 'Required:', bold: true, size: 20 })],
-                            spacing: { after: 50 }
-                        })
-                    );
-                    allChildren.push(...parser.renderMultilineTextAsParagraphs(clean.requiredText, {
-                        indent: { left: 400 },
-                        spacing: { after: 100 }
-                    }));
-                }
+                allChildren.push(...this.renderPdfNonMcQuestionBlock(clean, displayNumber, idx === 0));
             });
         }
 
