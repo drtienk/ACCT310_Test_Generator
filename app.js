@@ -436,6 +436,63 @@ class PDFParser {
         };
     }
 
+    detectFinancialCostRetailTable(questionOnlyLines) {
+        const lines = (questionOnlyLines || [])
+            .map(l => String(l == null ? '' : l).replace(/\s+/g, ' ').trim())
+            .filter(l => l.length > 0);
+
+        if (lines.length < 3) return null;
+
+        let headerIdx = -1;
+        for (let i = 0; i < lines.length; i++) {
+            const l = lines[i];
+            if (/\bCost\b/i.test(l) && /\bRetail\b/i.test(l) && l.length < 60) {
+                headerIdx = i;
+                break;
+            }
+        }
+        if (headerIdx < 0) return null;
+
+        const amountRe = /\$?\s*\d{1,3}(?:,\d{3})+(?:\.\d+)?|\$\s*\d+(?:\.\d+)?/g;
+        const dataRows = [];
+        let endIdx = headerIdx + 1;
+
+        for (let i = headerIdx + 1; i < lines.length; i++) {
+            const line = lines[i];
+            const amounts = [...line.matchAll(amountRe)].map(m => m[0].trim());
+            if (amounts.length === 0) break;
+
+            const firstAmountMatch = line.match(amountRe);
+            const firstAmountIdx = line.indexOf(firstAmountMatch[0]);
+            const item = line.substring(0, firstAmountIdx).replace(/[\s,]+$/, '').trim();
+            if (!item) break;
+
+            if (amounts.length === 2) {
+                dataRows.push([item, amounts[0], amounts[1]]);
+            } else if (amounts.length === 1) {
+                if (/\b(markups?|markdowns?|sales?|shrinkage)\b/i.test(item)) {
+                    dataRows.push([item, '', amounts[0]]);
+                } else {
+                    dataRows.push([item, amounts[0], '']);
+                }
+            } else {
+                break;
+            }
+            endIdx = i + 1;
+        }
+
+        if (dataRows.length < 2) return null;
+
+        const beforeText = lines.slice(0, headerIdx).join(' ').trim();
+        const afterText = lines.slice(endIdx).join(' ').trim();
+
+        return {
+            beforeText,
+            afterText,
+            rows: [['Item', 'Cost', 'Retail'], ...dataRows]
+        };
+    }
+
     buildFinancialQuestionSheetBlocks(questionOnlyLines) {
         const lines = (questionOnlyLines || [])
             .map(line => String(line == null ? '' : line).replace(/\s+/g, ' ').trim())
@@ -447,7 +504,8 @@ class PDFParser {
         const beforeRequired = requiredIndex >= 0 ? lines.slice(0, requiredIndex) : lines.slice();
         const fromRequired = requiredIndex >= 0 ? lines.slice(requiredIndex) : [];
 
-        const tableMatch = this.detectFinancialCompactSetupTable(beforeRequired);
+        const tableMatch = this.detectFinancialCompactSetupTable(beforeRequired)
+            || this.detectFinancialCostRetailTable(beforeRequired);
 
         const blocks = [];
         const pushParagraphBlock = (text) => {
@@ -477,7 +535,17 @@ class PDFParser {
 
         pushParagraphBlock(tableMatch.afterText);
 
-        fromRequired.forEach(line => pushParagraphBlock(line));
+        if (fromRequired.length > 0) {
+            const reqParsed = this.splitFinancialNonMcBody(
+                this.cleanFinancialNonMcMultilineText(fromRequired.join('\n'))
+            );
+            if (reqParsed.requiredText) {
+                pushParagraphBlock('Required:');
+                reqParsed.requiredText.split('\n').forEach(line => pushParagraphBlock(line));
+            } else if (reqParsed.promptText) {
+                pushParagraphBlock(reqParsed.promptText);
+            }
+        }
 
         return blocks.length > 0 ? blocks : null;
     }
