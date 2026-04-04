@@ -517,7 +517,7 @@ class PDFParser {
         if (!tableMatch) {
             const parsed = this.splitFinancialNonMcBody(this.cleanFinancialNonMcMultilineText(lines.join('\n')));
             if (parsed.promptText) {
-                pushParagraphBlock(parsed.promptText);
+                parsed.promptText.split('\n').forEach(line => pushParagraphBlock(line));
             }
             if (parsed.requiredText) {
                 pushParagraphBlock('Required:');
