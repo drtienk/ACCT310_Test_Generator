@@ -2507,6 +2507,7 @@ class WordGenerator {
     }
 
     renderPdfNonMcQuestionBlock(question, displayNumber, isFirstQuestion) {
+        const ANSWER_BLANK_LINES = 12;
         const q = question || {};
         const blocks = Array.isArray(q.questionSheetBlocks) ? q.questionSheetBlocks : null;
         if (!blocks || blocks.length === 0) {
@@ -2528,6 +2529,9 @@ class WordGenerator {
                     indent: { left: 400 },
                     spacing: { after: 100 }
                 }));
+            }
+            for (let b = 0; b < ANSWER_BLANK_LINES; b++) {
+                out.push(new docx.Paragraph({ children: [], spacing: { after: 0 } }));
             }
             return out;
         }
@@ -2592,6 +2596,9 @@ class WordGenerator {
             }
         });
 
+        for (let b = 0; b < ANSWER_BLANK_LINES; b++) {
+            out.push(new docx.Paragraph({ children: [], spacing: { after: 0 } }));
+        }
         return out;
     }
 
