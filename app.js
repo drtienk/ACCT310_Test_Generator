@@ -979,10 +979,13 @@ class PDFParser {
         }
 
         var correctLetter = String.fromCharCode(97 + answerIndex);
+        var stemParts = this._buildStemPartsFromLines(questionLines);
 
         return {
             originalId: questionId,
             questionText: questionText,
+            questionLinesArray: questionLines.slice(),
+            stemParts: stemParts,
             options: options,
             correctOption: correctLetter,
             hasCheckmark: answerDetectedByArrow,
@@ -1235,6 +1238,209 @@ class PDFParser {
             console.error('解析題目失敗:', error);
             return null;
         }
+    }
+
+    // ---- Text-based table detection for Financial MC question stems ----
+    // reconstructLines joins PDF text items with SINGLE spaces, so we cannot
+    // rely on whitespace-gap detection.  Instead we match known header patterns
+    // and label+value data rows by content.
+
+    _buildStemPartsFromLines(questionLines) {
+        if (!questionLines || questionLines.length === 0) return null;
+
+        var lines = [];
+        for (var i = 0; i < questionLines.length; i++) {
+            var l = String(questionLines[i] || '').trim();
+            if (l) lines.push(l);
+        }
+        if (lines.length === 0) return null;
+
+        // --- Header patterns --------------------------------------------------
+        // Each entry: { re: <regex>, colNames: <function(match,line)->string[]> }
+        // colNames returns the authoritative column names for this header type.
+        // Known multi-word column names in accounting tables (order matters: longer first)
+        var knownColNames = [
+            'Normal gross profit ratio', 'Replacement cost', 'Selling price',
+            'Costs to sell', 'Cost to sell', 'Net realizable value',
+            'Net purchases', 'Net sales', 'Net markups', 'Net markdowns',
+            'Beginning inventory', 'Ending inventory', 'Purchase returns',
+            'Employee discounts', 'Freight-in',
+            'Quantity', 'Cost', 'NRV', 'Retail', 'Product',
+            'Purchases', 'Sales', 'Balance', 'Date'
+        ];
+        // Build regex that splits a header line by known column names
+        var _splitHeaderByKnownCols = function(line) {
+            var remaining = String(line || '').trim();
+            var cols = [];
+            while (remaining.length > 0) {
+                remaining = remaining.replace(/^\s+/, '');
+                if (!remaining) break;
+                var matched = false;
+                for (var k = 0; k < knownColNames.length; k++) {
+                    if (remaining.toLowerCase().indexOf(knownColNames[k].toLowerCase()) === 0) {
+                        var name = knownColNames[k];
+                        cols.push(remaining.substring(0, name.length));
+                        remaining = remaining.substring(name.length);
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    // Take one word
+                    var spIdx = remaining.indexOf(' ');
+                    if (spIdx < 0) { cols.push(remaining); remaining = ''; }
+                    else { cols.push(remaining.substring(0, spIdx)); remaining = remaining.substring(spIdx); }
+                }
+            }
+            return cols;
+        };
+
+        var headerDefs = [
+            { // "Date Purchases Sales" / "Date Purchases Sales Balance"
+                re: /^Date\s+(Purchases|Sales|Cost|Retail|Quantity)\b/i,
+                colNames: function(_m, line) { return _splitHeaderByKnownCols(line); }
+            },
+            { // "Product Quantity Cost NRV" / "Product Selling price Cost ..."
+                re: /^Product\s+(Quantity|Cost|NRV|Selling)\b/i,
+                colNames: function(_m, line) { return _splitHeaderByKnownCols(line); }
+            },
+            { // "Cost Retail"
+                re: /^Cost\s+Retail\s*$/i,
+                colNames: function() { return ['', 'Cost', 'Retail']; }
+            }
+        ];
+
+        // A data-row carries numeric / monetary / unit info OR bare trailing number
+        var dataRowRe = /(\$[\d,]+|\d[\d,]*(\.\d+)?(%| units| each| point)|\bunits\b|\beach\b|@|\b\d{2,}\b)/i;
+        // A label-value line: starts with a word label, followed by $ or digit
+        var labelValueRe = /^[A-Za-z][\w\s]*?\s+[\$\d]/;
+
+        // --- Locate table region ---------------------------------------------
+        var tableStart = -1;
+        var hasExplicitHeader = false;
+        var headerCols = null;
+
+        // Strategy 1: explicit header
+        for (var i = 0; i < lines.length; i++) {
+            for (var h = 0; h < headerDefs.length; h++) {
+                var m = lines[i].match(headerDefs[h].re);
+                if (m) {
+                    tableStart = i;
+                    hasExplicitHeader = true;
+                    headerCols = headerDefs[h].colNames(m, lines[i]);
+                    break;
+                }
+            }
+            if (tableStart >= 0) break;
+        }
+
+        // Strategy 2: 2+ consecutive label-value data rows (no header)
+        if (tableStart < 0) {
+            var runStart = -1;
+            for (var i = 0; i < lines.length; i++) {
+                if (dataRowRe.test(lines[i]) && labelValueRe.test(lines[i])) {
+                    if (runStart < 0) runStart = i;
+                    if (i - runStart + 1 >= 2) { tableStart = runStart; break; }
+                } else {
+                    runStart = -1;
+                }
+            }
+        }
+
+        if (tableStart < 0) return null;
+
+        // Collect consecutive data rows after header (or from tableStart)
+        var dataStart = hasExplicitHeader ? tableStart + 1 : tableStart;
+        var tableEnd = dataStart;
+        for (var i = dataStart; i < lines.length; i++) {
+            if (dataRowRe.test(lines[i])) { tableEnd = i + 1; } else { break; }
+        }
+        if (tableEnd <= dataStart) return null;
+
+        var numCols = headerCols ? headerCols.length : 0;
+
+        // --- Parse data rows -------------------------------------------------
+        var dataRows = [];
+        for (var i = dataStart; i < tableEnd; i++) {
+            dataRows.push(this._splitDataRow(lines[i], numCols));
+        }
+
+        // Infer column count when no header
+        if (!numCols) {
+            for (var r = 0; r < dataRows.length; r++) {
+                if (dataRows[r].length > numCols) numCols = dataRows[r].length;
+            }
+        }
+
+        // Pad rows & header to numCols
+        for (var r = 0; r < dataRows.length; r++) {
+            while (dataRows[r].length < numCols) dataRows[r].push('');
+        }
+        if (headerCols) {
+            while (headerCols.length < numCols) headerCols.push('');
+        }
+
+        if (dataRows.length === 0) return null;
+
+        // --- Assemble stemParts ----------------------------------------------
+        var parts = [];
+        for (var i = 0; i < tableStart; i++) {
+            parts.push({ type: 'text', content: lines[i] });
+        }
+        parts.push({ type: 'table', headers: headerCols, rows: dataRows });
+        for (var i = tableEnd; i < lines.length; i++) {
+            parts.push({ type: 'text', content: lines[i] });
+        }
+        return parts;
+    }
+
+    // Split a single data row into columns.
+    // Strategy: walk tokens left-to-right.  The first column (label) accumulates
+    // all leading non-value words.  Each subsequent $amount / number / @-token
+    // starts a new column.  Finally we merge excess columns down to numCols.
+    _splitDataRow(line, numCols) {
+        var s = String(line || '').trim();
+
+        // Normalize "$ 15,000" → "$15,000" everywhere before any splitting
+        s = s.replace(/\$\s+(\d)/g, '$$$1');
+
+        // Fast path: if 2+ space gaps exist, use them
+        var segs = s.split(/\s{2,}/).filter(function(seg) { return seg.trim(); });
+        if (segs.length >= 2 && (numCols === 0 || segs.length === numCols)) {
+            return segs.map(function(seg) { return seg.trim(); });
+        }
+
+        // Token walk — value tokens start with $ or digit (but NOT day-of-month
+        // digits that follow a month name in the label column)
+        var months = /^(january|february|march|april|may|june|july|august|september|october|november|december)$/i;
+        var tokens = s.split(/\s+/);
+        var cols = [];
+        var current = '';
+        var prevIsMonth = false;
+
+        for (var t = 0; t < tokens.length; t++) {
+            var tok = tokens[t];
+            var startsValue = /^[\$@]/.test(tok) ||
+                (/^\d/.test(tok) && !prevIsMonth);
+
+            if (startsValue && current !== '') {
+                cols.push(current.trim());
+                current = tok;
+            } else {
+                current = current ? current + ' ' + tok : tok;
+            }
+            prevIsMonth = months.test(tok);
+        }
+        if (current) cols.push(current.trim());
+
+        // Merge excess trailing columns into the last slot when numCols known
+        if (numCols > 0 && cols.length > numCols) {
+            var merged = cols.slice(0, numCols - 1);
+            merged.push(cols.slice(numCols - 1).join(' '));
+            cols = merged;
+        }
+
+        return cols;
     }
 }
 
@@ -2692,26 +2898,138 @@ class WordGenerator {
 
         // 題目內容（移除所有標記和原始 ID）
         questions.forEach((q, index) => {
-            // 清理題目文字：移除附錄標籤和 (Algorithmic)（僅在題目卷中）
-            // 移除 (Appendix...) 格式的標籤，包括 (Appendix 4B), (Appendix A) 等
-            let cleanedQuestionText = q.questionText.replace(/\(Appendix[^)]*\)/gi, '');
-            // 移除 (Algorithmic) 標籤
-            cleanedQuestionText = cleanedQuestionText.replace(/\(Algorithmic\)/gi, '');
-            // 清理可能留下的多餘空格
-            cleanedQuestionText = cleanedQuestionText.trim().replace(/\s+/g, ' ');
-            
-            // 題目編號和文字（格式：1. 題目文字）
-            allChildren.push(
-                new docx.Paragraph({
-                    children: [
-                        new docx.TextRun({
-                            text: `${index + 1}. ${cleanedQuestionText}`,
-                            size: 22
+            if (q.stemParts && q.stemParts.length > 0) {
+                // Render structured stem with embedded table(s)
+                const stemTblBorder = (typeof docx.BorderStyle !== 'undefined')
+                    ? { style: docx.BorderStyle.SINGLE, size: 2 }
+                    : { size: 2 };
+                let isFirstPart = true;
+                for (const part of q.stemParts) {
+                    if (part.type === 'text') {
+                        let text = part.content
+                            .replace(/\(Appendix[^)]*\)/gi, '')
+                            .replace(/\(Algorithmic\)/gi, '')
+                            .replace(/\s+/g, ' ')
+                            .trim();
+                        if (!text) continue;
+                        if (isFirstPart) text = `${index + 1}. ${text}`;
+                        allChildren.push(new docx.Paragraph({
+                            children: [new docx.TextRun({ text: text, size: 22 })],
+                            spacing: {
+                                before: isFirstPart ? (index === 0 ? 0 : 300) : 60,
+                                after: 60
+                            }
+                        }));
+                        isFirstPart = false;
+                    } else if (part.type === 'table') {
+                        if (isFirstPart) {
+                            allChildren.push(new docx.Paragraph({
+                                children: [new docx.TextRun({ text: `${index + 1}.`, size: 22 })],
+                                spacing: { before: index === 0 ? 0 : 300, after: 60 }
+                            }));
+                            isFirstPart = false;
+                        }
+                        const tblRows = [];
+                        if (part.headers) {
+                            tblRows.push(new docx.TableRow({
+                                children: part.headers.map(function(h) {
+                                    return new docx.TableCell({
+                                        children: [new docx.Paragraph({
+                                            children: [new docx.TextRun({ text: h || '', bold: true, size: 20 })],
+                                            alignment: docx.AlignmentType.CENTER
+                                        })],
+                                        verticalAlignment: docx.VerticalAlign.CENTER
+                                    });
+                                })
+                            }));
+                        }
+                        for (const row of part.rows) {
+                            tblRows.push(new docx.TableRow({
+                                children: row.map(function(cell, ci) {
+                                    return new docx.TableCell({
+                                        children: [new docx.Paragraph({
+                                            children: [new docx.TextRun({ text: cell || '', size: 20 })],
+                                            alignment: ci > 0 ? docx.AlignmentType.RIGHT : docx.AlignmentType.LEFT
+                                        })],
+                                        verticalAlignment: docx.VerticalAlign.CENTER
+                                    });
+                                })
+                            }));
+                        }
+                        if (tblRows.length > 0) {
+                            allChildren.push(new docx.Table({
+                                rows: tblRows,
+                                width: { size: 65, type: docx.WidthType.PERCENTAGE },
+                                borders: {
+                                    top: stemTblBorder, bottom: stemTblBorder,
+                                    left: stemTblBorder, right: stemTblBorder,
+                                    insideHorizontal: stemTblBorder, insideVertical: stemTblBorder
+                                }
+                            }));
+                        }
+                    }
+                }
+                // Fallback if all parts were empty
+                if (isFirstPart) {
+                    let cleanedQuestionText = q.questionText
+                        .replace(/\(Appendix[^)]*\)/gi, '')
+                        .replace(/\(Algorithmic\)/gi, '')
+                        .trim().replace(/\s+/g, ' ');
+                    allChildren.push(new docx.Paragraph({
+                        children: [new docx.TextRun({ text: `${index + 1}. ${cleanedQuestionText}`, size: 22 })],
+                        spacing: { before: index === 0 ? 0 : 300, after: 200 }
+                    }));
+                }
+            } else {
+                // Render with per-line paragraphs when questionLinesArray is available
+                if (q.questionLinesArray && q.questionLinesArray.length > 0) {
+                    const cleanLine = (l) => String(l || '')
+                        .replace(/\(Appendix[^)]*\)/gi, '')
+                        .replace(/\(Algorithmic\)/gi, '')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                    let firstRendered = true;
+                    for (let li = 0; li < q.questionLinesArray.length; li++) {
+                        const lineText = cleanLine(q.questionLinesArray[li]);
+                        if (!lineText) continue;
+                        const prefix = firstRendered ? `${index + 1}. ` : '';
+                        allChildren.push(new docx.Paragraph({
+                            children: [new docx.TextRun({ text: prefix + lineText, size: 22 })],
+                            spacing: {
+                                before: firstRendered ? (index === 0 ? 0 : 300) : 20,
+                                after: li === q.questionLinesArray.length - 1 ? 200 : 20
+                            }
+                        }));
+                        firstRendered = false;
+                    }
+                    // Fallback if all lines were empty
+                    if (firstRendered) {
+                        let cleanedQuestionText = q.questionText
+                            .replace(/\(Appendix[^)]*\)/gi, '')
+                            .replace(/\(Algorithmic\)/gi, '')
+                            .trim().replace(/\s+/g, ' ');
+                        allChildren.push(new docx.Paragraph({
+                            children: [new docx.TextRun({ text: `${index + 1}. ${cleanedQuestionText}`, size: 22 })],
+                            spacing: { before: index === 0 ? 0 : 300, after: 200 }
+                        }));
+                    }
+                } else {
+                    let cleanedQuestionText = q.questionText.replace(/\(Appendix[^)]*\)/gi, '');
+                    cleanedQuestionText = cleanedQuestionText.replace(/\(Algorithmic\)/gi, '');
+                    cleanedQuestionText = cleanedQuestionText.trim().replace(/\s+/g, ' ');
+                    allChildren.push(
+                        new docx.Paragraph({
+                            children: [
+                                new docx.TextRun({
+                                    text: `${index + 1}. ${cleanedQuestionText}`,
+                                    size: 22
+                                })
+                            ],
+                            spacing: { before: index === 0 ? 0 : 300, after: 200 }
                         })
-                    ],
-                    spacing: { before: index === 0 ? 0 : 300, after: 200 }
-                })
-            );
+                    );
+                }
+            }
 
             // 選項（移除 ✔ 和 ✓ 標記）
             q.options.forEach(function(option) {
