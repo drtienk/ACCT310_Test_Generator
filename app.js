@@ -515,21 +515,38 @@ class PDFParser {
         }
         if (firstDataIdx < 1) return null;
 
-        // Collect consecutive data rows with consistent dollar-amount count
+        // Collect consecutive data rows: allow both $-amount rows and plain trailing-number rows
+        const trailingNumsRe = /^(.+?)\s+((?:\d+(?:,\d{3})*(?:\.\d+)?\s+)*\d+(?:,\d{3})*(?:\.\d+)?)\s*$/;
         const dataRows = [];
         let endIdx = firstDataIdx;
         for (let i = firstDataIdx; i < lines.length; i++) {
-            const amounts = (lines[i].match(dollarRe) || []);
-            if (amounts.length < 2) break;
-            if (Math.abs(amounts.length - firstRowAmountCount) > 1) break;
+            const line = lines[i];
 
-            const firstMatch = lines[i].match(dollarRe);
-            const firstIdx = lines[i].indexOf(firstMatch[0]);
-            const label = lines[i].substring(0, firstIdx).replace(/[\s$]+$/, '').trim();
-            if (!label) break;
+            // Try dollar amounts first
+            const dollarAmounts = (line.match(dollarRe) || []);
+            if (dollarAmounts.length >= 2 && Math.abs(dollarAmounts.length - firstRowAmountCount) <= 1) {
+                const firstMatch = line.match(dollarRe);
+                const firstIdx = line.indexOf(firstMatch[0]);
+                const label = line.substring(0, firstIdx).replace(/[\s$]+$/, '').trim();
+                if (!label) break;
+                dataRows.push([label, ...dollarAmounts.map(a => a.trim())]);
+                endIdx = i + 1;
+                continue;
+            }
 
-            dataRows.push([label, ...amounts.map(a => a.trim())]);
-            endIdx = i + 1;
+            // Fallback: trailing plain numbers matching expected column count
+            const trailingMatch = line.match(trailingNumsRe);
+            if (trailingMatch) {
+                const label = trailingMatch[1].trim();
+                const nums = trailingMatch[2].trim().split(/\s+/);
+                if (nums.length === firstRowAmountCount && label.length > 0) {
+                    dataRows.push([label, ...nums]);
+                    endIdx = i + 1;
+                    continue;
+                }
+            }
+
+            break; // No match → end of table
         }
 
         if (dataRows.length < 3) return null; // require 3+ rows to avoid false positives
