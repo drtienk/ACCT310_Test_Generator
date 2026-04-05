@@ -493,6 +493,91 @@ class PDFParser {
         };
     }
 
+    detectFinancialGenericSetupTable(questionOnlyLines, requiredTextHint) {
+        const lines = (questionOnlyLines || [])
+            .map(l => String(l == null ? '' : l).replace(/\s+/g, ' ').trim())
+            .filter(l => l.length > 0);
+
+        if (lines.length < 4) return null; // need header + 3+ data rows
+
+        const dollarRe = /\$\s*[\d,]+(?:\.\d+)?/g;
+
+        // Find the first line with 2+ dollar amounts (first data row)
+        let firstDataIdx = -1;
+        let firstRowAmountCount = 0;
+        for (let i = 1; i < lines.length; i++) {
+            const amounts = (lines[i].match(dollarRe) || []);
+            if (amounts.length >= 2) {
+                firstDataIdx = i;
+                firstRowAmountCount = amounts.length;
+                break;
+            }
+        }
+        if (firstDataIdx < 1) return null;
+
+        // Collect consecutive data rows with consistent dollar-amount count
+        const dataRows = [];
+        let endIdx = firstDataIdx;
+        for (let i = firstDataIdx; i < lines.length; i++) {
+            const amounts = (lines[i].match(dollarRe) || []);
+            if (amounts.length < 2) break;
+            if (Math.abs(amounts.length - firstRowAmountCount) > 1) break;
+
+            const firstMatch = lines[i].match(dollarRe);
+            const firstIdx = lines[i].indexOf(firstMatch[0]);
+            const label = lines[i].substring(0, firstIdx).replace(/[\s$]+$/, '').trim();
+            if (!label) break;
+
+            dataRows.push([label, ...amounts.map(a => a.trim())]);
+            endIdx = i + 1;
+        }
+
+        if (dataRows.length < 3) return null; // require 3+ rows to avoid false positives
+
+        // Determine column count from data
+        const numValueCols = Math.max(...dataRows.map(r => r.length - 1));
+        const numCols = numValueCols + 1;
+
+        // Parse header line (line just before first data row)
+        const headerIdx = firstDataIdx - 1;
+        const headerLine = lines[headerIdx];
+        let headerCells = [''];
+
+        // Try year pattern (e.g. "2027 2028 2029")
+        const years = [...headerLine.matchAll(/\b(20\d{2})\b/g)].map(m => m[1]);
+        if (years.length === numValueCols) {
+            headerCells = ['', ...years];
+        } else {
+            // Try "Product N" pattern (e.g. "Product 1 Product 2 Product 3")
+            const products = [...headerLine.matchAll(/\b(Product\s*\d+)\b/ig)].map(m => m[1]);
+            if (products.length === numValueCols) {
+                headerCells = ['', ...products];
+            } else {
+                // Fallback: put header text in first cell, pad rest
+                headerCells = [headerLine];
+                while (headerCells.length < numCols) headerCells.push('');
+            }
+        }
+
+        // Pad all rows to consistent column count
+        const rows = [headerCells.slice(0, numCols)];
+        const stripValues = /\b(missing\s+numbers?|determine\s+the\s+missing)\b/i.test(requiredTextHint || '');
+        dataRows.forEach(row => {
+            const padded = [...row];
+            while (padded.length < numCols) padded.push('');
+            if (stripValues) {
+                rows.push([padded[0], ...padded.slice(1).map(() => '')]);
+            } else {
+                rows.push(padded.slice(0, numCols));
+            }
+        });
+
+        const beforeText = lines.slice(0, headerIdx).join('\n').trim();
+        const afterText = lines.slice(endIdx).join('\n').trim();
+
+        return { beforeText, afterText, rows };
+    }
+
     buildFinancialQuestionSheetBlocks(questionOnlyLines) {
         const lines = (questionOnlyLines || [])
             .map(line => String(line == null ? '' : line).replace(/\s+/g, ' ').trim())
@@ -505,7 +590,8 @@ class PDFParser {
         const fromRequired = requiredIndex >= 0 ? lines.slice(requiredIndex) : [];
 
         const tableMatch = this.detectFinancialCompactSetupTable(beforeRequired)
-            || this.detectFinancialCostRetailTable(beforeRequired);
+            || this.detectFinancialCostRetailTable(beforeRequired)
+            || this.detectFinancialGenericSetupTable(beforeRequired, fromRequired.join(' '));
 
         const blocks = [];
         const pushParagraphBlock = (text) => {
@@ -513,27 +599,30 @@ class PDFParser {
             if (!cleaned) return;
             blocks.push({ type: 'paragraph', text: cleaned });
         };
+        const pushMultilineParagraphs = (text) => {
+            String(text == null ? '' : text).split('\n').forEach(line => pushParagraphBlock(line));
+        };
 
         if (!tableMatch) {
             const parsed = this.splitFinancialNonMcBody(this.cleanFinancialNonMcMultilineText(lines.join('\n')));
             if (parsed.promptText) {
-                parsed.promptText.split('\n').forEach(line => pushParagraphBlock(line));
+                pushMultilineParagraphs(parsed.promptText);
             }
             if (parsed.requiredText) {
                 pushParagraphBlock('Required:');
-                parsed.requiredText.split('\n').forEach(line => pushParagraphBlock(line));
+                pushMultilineParagraphs(parsed.requiredText);
             }
             return blocks.length > 0 ? blocks : null;
         }
 
-        pushParagraphBlock(tableMatch.beforeText);
+        pushMultilineParagraphs(tableMatch.beforeText);
 
         blocks.push({
             type: 'table',
             rows: tableMatch.rows
         });
 
-        pushParagraphBlock(tableMatch.afterText);
+        pushMultilineParagraphs(tableMatch.afterText);
 
         if (fromRequired.length > 0) {
             const reqParsed = this.splitFinancialNonMcBody(
@@ -629,6 +718,25 @@ class PDFParser {
         const isWorksheetTableHeaderLine = function(text) {
             return /^(Ending|Date|Inventory Layers Converted to Base Year Cost|Inventory Layers Converted to Acquisition Year Cost|Inventory DVL Cost|Year-End Cost Index)\b/i.test(text);
         };
+        const isAnswerContentLine = function(text) {
+            // Skip Note: lines — they are question content
+            if (/^Note\s*:/i.test(text)) return false;
+            // Skip numbered requirement list items with at most 1 $ sign
+            if (/^\d+[\.\)]\s/.test(text) && (text.match(/\$/g) || []).length <= 1) return false;
+            // Multiple $ signs → answer table row (e.g. "$ 275 $ 320 $ 249")
+            if ((text.match(/\$/g) || []).length >= 2) return true;
+            // Starts with $ → standalone dollar answer
+            if (/^\$\s*[\d,]/.test(text)) return true;
+            // Journal entry table headers
+            if (/\bGeneral\s+Journal\b/i.test(text)) return true;
+            // Debit/Credit answer table headers
+            if (/\bDebit\b/i.test(text) && /\bCredit\b/i.test(text)) return true;
+            // Specific answer result patterns (e.g. "Correct inventory balance $ 204,000")
+            if (/^(Correct|Estimated)\b.*\$\s*[\d,]/i.test(text)) return true;
+            // Lines that are purely $ signs and whitespace
+            if (/^[\s$]+$/.test(text) && /\$/.test(text)) return true;
+            return false;
+        };
 
         const questionOnlyLines = [];
         let seenRequiredSection = false;
@@ -659,6 +767,7 @@ class PDFParser {
                 if (startsWorksheetTabs) break;
                 if (startsWorksheetTableAfterNote) break;
                 if (isPostQuestionSectionLine(line)) break;
+                if (isAnswerContentLine(line)) break;
             }
 
             if (/^rev\s*:/i.test(line)) break;
