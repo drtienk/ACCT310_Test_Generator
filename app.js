@@ -284,9 +284,15 @@ class PDFParser {
     }
 
     findFinancialStartIndex(lines) {
+        // Pattern 1: "1. Award: 0.55 points" (number on same line)
         var awardPattern = /^\d+\.\s*Award:\s*\d+(\.\d+)?\s*point(s)?/i;
         for (var i = 0; i < lines.length; i++) {
             if (awardPattern.test(lines[i])) return i;
+        }
+        // Pattern 2: "Award: 1.00 point" (number on a prior separate line)
+        var awardOnlyPattern = /^Award:\s*\d+(\.\d+)?\s*point(s)?/i;
+        for (var i = 0; i < lines.length; i++) {
+            if (awardOnlyPattern.test(lines[i])) return i;
         }
         return -1;
     }
@@ -831,13 +837,28 @@ class PDFParser {
 
         var endIdx = content.length;
         for (var i = 0; i < content.length; i++) {
-            if (/^References$/i.test(content[i]) || /^Multiple Choice/i.test(content[i]) || /^Question\s+\d+/i.test(content[i])) {
+            if (/^References$/i.test(content[i]) || /^Multiple\b/i.test(content[i]) || /^Question\s+\d+/i.test(content[i])) {
                 endIdx = i;
                 break;
             }
         }
 
-        var questionContent = content.slice(0, endIdx);
+        var rawQuestionContent = content.slice(0, endIdx);
+
+        // Pre-process: merge CIRCLE/ARROW-only lines with the preceding text line.
+        // Some PDFs place the symbol on a separate line after the option text.
+        var questionContent = [];
+        for (var i = 0; i < rawQuestionContent.length; i++) {
+            var ln = rawQuestionContent[i];
+            var stripped = ln.split(CIRCLE).join('').split(ARROW).join('').trim();
+            var hasSymbol = ln.indexOf(CIRCLE) !== -1 || ln.indexOf(ARROW) !== -1;
+            if (hasSymbol && stripped === '' && questionContent.length > 0) {
+                // Symbol-only line: attach symbols to the preceding line
+                questionContent[questionContent.length - 1] += ' ' + ln;
+            } else {
+                questionContent.push(ln);
+            }
+        }
 
         var questionLines = [];
         var optionLines = [];
@@ -1381,6 +1402,17 @@ class PDFParser {
         }
 
         if (dataRows.length === 0) return null;
+
+        // --- Guard: reject false-positive tables (long descriptive text) -----
+        // Real tables have short label columns (item names like "Net sales",
+        // "March 8", "Revolvers").  False positives are long descriptive
+        // sentences that happen to end with a number.
+        var totalFirstColLen = 0;
+        for (var r = 0; r < dataRows.length; r++) {
+            totalFirstColLen += (dataRows[r][0] || '').length;
+        }
+        var avgFirstColLen = totalFirstColLen / dataRows.length;
+        if (avgFirstColLen > 50) return null;
 
         // --- Assemble stemParts ----------------------------------------------
         var parts = [];
