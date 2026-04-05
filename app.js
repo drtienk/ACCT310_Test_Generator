@@ -436,60 +436,95 @@ class PDFParser {
         };
     }
 
-    detectFinancialCostRetailTable(questionOnlyLines) {
-        const lines = (questionOnlyLines || [])
-            .map(l => String(l == null ? '' : l).replace(/\s+/g, ' ').trim())
-            .filter(l => l.length > 0);
+    detectFinancialCostRetailSetupTables(questionOnlyLines) {
+        const normalizedLines = (questionOnlyLines || [])
+            .map(line => String(line == null ? '' : line).replace(/\s+/g, ' ').trim())
+            .filter(line => line.length > 0);
 
-        if (lines.length < 3) return null;
+        if (normalizedLines.length === 0) return null;
 
-        let headerIdx = -1;
-        for (let i = 0; i < lines.length; i++) {
-            const l = lines[i];
-            if (/\bCost\b/i.test(l) && /\bRetail\b/i.test(l) && l.length < 60) {
-                headerIdx = i;
-                break;
+        const joined = normalizedLines.join(' ').replace(/\s+/g, ' ').trim();
+        if (!joined) return null;
+
+        const recordsIntroMatch = joined.match(/Accounting records provide the following information:\s*/i);
+        const costRetailHeaderMatch = joined.match(/\bCost\s+Retail\b\s*/i);
+        const indexesIntroMatch = joined.match(/Related retail price indexes are as follows:\s*/i);
+        if (!recordsIntroMatch || !costRetailHeaderMatch || !indexesIntroMatch) return null;
+        if (recordsIntroMatch.index == null || costRetailHeaderMatch.index == null || indexesIntroMatch.index == null) return null;
+        if (costRetailHeaderMatch.index < recordsIntroMatch.index || indexesIntroMatch.index <= costRetailHeaderMatch.index) return null;
+
+        const beforeText = joined.slice(0, recordsIntroMatch.index).trim();
+        const recordsIntroText = joined.slice(recordsIntroMatch.index, costRetailHeaderMatch.index).trim();
+        const mainTableText = joined.slice(costRetailHeaderMatch.index + costRetailHeaderMatch[0].length, indexesIntroMatch.index).trim();
+        const indexSectionText = joined.slice(indexesIntroMatch.index).trim();
+        if (!recordsIntroText || !mainTableText || !indexSectionText) return null;
+
+        const normalizeNumber = (value) => String(value == null ? '' : value).replace(/\s+/g, '').trim();
+        const mainRows = [
+            ['Item', 'Cost', 'Retail']
+        ];
+        const rowSpecs = [
+            {
+                label: 'Beginning inventory, January 1, 2027',
+                regex: /Beginning inventory,\s*January 1,\s*2027\s+([\d,]+(?:\.\d+)?)\s+([\d,]+(?:\.\d+)?)/i
+            },
+            {
+                label: 'Net purchases',
+                regex: /Net purchases\s+([\d,]+(?:\.\d+)?)\s+([\d,]+(?:\.\d+)?)/i
+            },
+            {
+                label: 'Net markups',
+                regex: /Net markups\s+([\d,]+(?:\.\d+)?)/i,
+                retailOnly: true
+            },
+            {
+                label: 'Net markdowns',
+                regex: /Net markdowns\s+([\d,]+(?:\.\d+)?)/i,
+                retailOnly: true
+            },
+            {
+                label: 'Net sales',
+                regex: /Net sales\s+([\d,]+(?:\.\d+)?)/i,
+                retailOnly: true
             }
-        }
-        if (headerIdx < 0) return null;
+        ];
 
-        const amountRe = /\$?\s*\d{1,3}(?:,\d{3})+(?:\.\d+)?|\$\s*\d+(?:\.\d+)?/g;
-        const dataRows = [];
-        let endIdx = headerIdx + 1;
-
-        for (let i = headerIdx + 1; i < lines.length; i++) {
-            const line = lines[i];
-            const amounts = [...line.matchAll(amountRe)].map(m => m[0].trim());
-            if (amounts.length === 0) break;
-
-            const firstAmountMatch = line.match(amountRe);
-            const firstAmountIdx = line.indexOf(firstAmountMatch[0]);
-            const item = line.substring(0, firstAmountIdx).replace(/[\s,]+$/, '').trim();
-            if (!item) break;
-
-            if (amounts.length === 2) {
-                dataRows.push([item, amounts[0], amounts[1]]);
-            } else if (amounts.length === 1) {
-                if (/\b(markups?|markdowns?|sales?|shrinkage)\b/i.test(item)) {
-                    dataRows.push([item, '', amounts[0]]);
-                } else {
-                    dataRows.push([item, amounts[0], '']);
-                }
+        for (let i = 0; i < rowSpecs.length; i++) {
+            const spec = rowSpecs[i];
+            const match = mainTableText.match(spec.regex);
+            if (!match) return null;
+            if (spec.retailOnly) {
+                mainRows.push([spec.label, '', normalizeNumber(match[1])]);
             } else {
-                break;
+                mainRows.push([spec.label, normalizeNumber(match[1]), normalizeNumber(match[2])]);
             }
-            endIdx = i + 1;
         }
 
-        if (dataRows.length < 2) return null;
+        const indexIntroText = 'Related retail price indexes are as follows:';
+        const indexRows = [
+            ['Date', 'Retail Price Index']
+        ];
+        const indexMatches = [...indexSectionText.matchAll(/(January 1,\s*2027|December 31,\s*2027)\s+(\d+\.\d+)/ig)];
+        if (indexMatches.length < 2) return null;
 
-        const beforeText = lines.slice(0, headerIdx).join(' ').trim();
-        const afterText = lines.slice(endIdx).join(' ').trim();
+        indexMatches.forEach(match => {
+            indexRows.push([
+                String(match[1] || '').replace(/\s+/g, ' ').trim(),
+                String(match[2] || '').trim()
+            ]);
+        });
+
+        const lastIndexMatch = indexMatches[indexMatches.length - 1];
+        if (lastIndexMatch.index == null) return null;
+        const afterText = indexSectionText.slice(lastIndexMatch.index + lastIndexMatch[0].length).trim();
 
         return {
             beforeText,
-            afterText,
-            rows: [['Item', 'Cost', 'Retail'], ...dataRows]
+            recordsIntroText,
+            mainRows,
+            indexIntroText,
+            indexRows,
+            afterText
         };
     }
 
@@ -504,9 +539,6 @@ class PDFParser {
         const beforeRequired = requiredIndex >= 0 ? lines.slice(0, requiredIndex) : lines.slice();
         const fromRequired = requiredIndex >= 0 ? lines.slice(requiredIndex) : [];
 
-        const tableMatch = this.detectFinancialCompactSetupTable(beforeRequired)
-            || this.detectFinancialCostRetailTable(beforeRequired);
-
         const blocks = [];
         const pushParagraphBlock = (text) => {
             const cleaned = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
@@ -514,37 +546,43 @@ class PDFParser {
             blocks.push({ type: 'paragraph', text: cleaned });
         };
 
-        if (!tableMatch) {
-            const parsed = this.splitFinancialNonMcBody(this.cleanFinancialNonMcMultilineText(lines.join('\n')));
-            if (parsed.promptText) {
-                parsed.promptText.split('\n').forEach(line => pushParagraphBlock(line));
-            }
-            if (parsed.requiredText) {
-                pushParagraphBlock('Required:');
-                parsed.requiredText.split('\n').forEach(line => pushParagraphBlock(line));
-            }
+        const compactTableMatch = this.detectFinancialCompactSetupTable(beforeRequired);
+        if (compactTableMatch) {
+            pushParagraphBlock(compactTableMatch.beforeText);
+            blocks.push({
+                type: 'table',
+                rows: compactTableMatch.rows
+            });
+            pushParagraphBlock(compactTableMatch.afterText);
+            fromRequired.forEach(line => pushParagraphBlock(line));
             return blocks.length > 0 ? blocks : null;
         }
 
-        pushParagraphBlock(tableMatch.beforeText);
+        const costRetailMatch = this.detectFinancialCostRetailSetupTables(beforeRequired);
+        if (costRetailMatch) {
+            pushParagraphBlock(costRetailMatch.beforeText);
+            pushParagraphBlock(costRetailMatch.recordsIntroText);
+            blocks.push({
+                type: 'table',
+                rows: costRetailMatch.mainRows
+            });
+            pushParagraphBlock(costRetailMatch.indexIntroText);
+            blocks.push({
+                type: 'table',
+                rows: costRetailMatch.indexRows
+            });
+            pushParagraphBlock(costRetailMatch.afterText);
+            fromRequired.forEach(line => pushParagraphBlock(line));
+            return blocks.length > 0 ? blocks : null;
+        }
 
-        blocks.push({
-            type: 'table',
-            rows: tableMatch.rows
-        });
-
-        pushParagraphBlock(tableMatch.afterText);
-
-        if (fromRequired.length > 0) {
-            const reqParsed = this.splitFinancialNonMcBody(
-                this.cleanFinancialNonMcMultilineText(fromRequired.join('\n'))
-            );
-            if (reqParsed.requiredText) {
-                pushParagraphBlock('Required:');
-                reqParsed.requiredText.split('\n').forEach(line => pushParagraphBlock(line));
-            } else if (reqParsed.promptText) {
-                pushParagraphBlock(reqParsed.promptText);
-            }
+        const parsed = this.splitFinancialNonMcBody(this.cleanFinancialNonMcMultilineText(lines.join('\n')));
+        if (parsed.promptText) {
+            pushParagraphBlock(parsed.promptText);
+        }
+        if (parsed.requiredText) {
+            pushParagraphBlock('Required:');
+            parsed.requiredText.split('\n').forEach(line => pushParagraphBlock(line));
         }
 
         return blocks.length > 0 ? blocks : null;
@@ -597,8 +635,7 @@ class PDFParser {
         if (!this.shouldTreatFinancialPageAsNonMc(cleanedLines)) return null;
 
         const awardIdx = this.findFinancialStartIndex(cleanedLines);
-        if (awardIdx < 0) return null;
-        const contentLines = cleanedLines.slice(awardIdx + 1);
+        const contentLines = awardIdx >= 0 ? cleanedLines.slice(awardIdx + 1) : cleanedLines.slice();
         const rawBlockText = this.cleanFinancialNonMcMultilineText(contentLines.join('\n'));
         if (!rawBlockText) return null;
 
@@ -622,6 +659,9 @@ class PDFParser {
         };
         const isPostQuestionSectionLine = function(text) {
             return /^(Explanation|Hints?|References?|Solution|Answer|Correct\s+Answer)\b\s*[:?]?/i.test(text);
+        };
+        const isAnswerWorksheetLine = function(text) {
+            return /^(ending inventory at retail|ending inventory at cost|cost of goods sold|base layer cost-to-retail percentage|\d{4}\s+layer cost-to-retail percentage|step\s+\d+\b|inventory layers\b|worksheet\b)/i.test(text);
         };
         const isNoteLine = function(text) {
             return /^Note\s*:/i.test(text);
@@ -659,6 +699,7 @@ class PDFParser {
                 if (startsWorksheetTabs) break;
                 if (startsWorksheetTableAfterNote) break;
                 if (isPostQuestionSectionLine(line)) break;
+                if (isAnswerWorksheetLine(line)) break;
             }
 
             if (/^rev\s*:/i.test(line)) break;
@@ -2380,31 +2421,9 @@ class WordGenerator {
         };
     }
 
-    renderPdfNonMcQuestionBlock(question, displayNumber, isFirstQuestion) {
-        const q = question || {};
-        const blocks = Array.isArray(q.questionSheetBlocks) ? q.questionSheetBlocks : null;
-        if (!blocks || blocks.length === 0) {
-            const out = [];
-            out.push(
-                new docx.Paragraph({
-                    children: [new docx.TextRun({ text: `${displayNumber}. ${q.promptText || ''}`, size: 22 })],
-                    spacing: { before: isFirstQuestion ? 0 : 250, after: 100 }
-                })
-            );
-            if (q.requiredText) {
-                out.push(
-                    new docx.Paragraph({
-                        children: [new docx.TextRun({ text: 'Required:', bold: true, size: 20 })],
-                        spacing: { after: 50 }
-                    })
-                );
-                out.push(...parser.renderMultilineTextAsParagraphs(q.requiredText, {
-                    indent: { left: 400 },
-                    spacing: { after: 100 }
-                }));
-            }
-            return out;
-        }
+    renderStructuredPdfNonMcQuestionSheetBlocks(blocks, displayNumber, isFirstQuestion) {
+        const safeBlocks = Array.isArray(blocks) ? blocks.filter(block => block && block.type) : [];
+        if (safeBlocks.length === 0) return [];
 
         const out = [];
         let usedQuestionNumber = false;
@@ -2413,7 +2432,7 @@ class WordGenerator {
             ? { style: docx.BorderStyle.SINGLE, size: 4 }
             : { size: 4 };
 
-        blocks.forEach((block, index) => {
+        safeBlocks.forEach((block, index) => {
             if (block.type === 'paragraph') {
                 const text = String(block.text || '').trim();
                 if (!text) return;
@@ -2436,8 +2455,10 @@ class WordGenerator {
             }
 
             if (block.type === 'table' && Array.isArray(block.rows) && block.rows.length > 0) {
+                const rows = block.rows.filter(row => Array.isArray(row) && row.length > 0);
+                if (rows.length === 0) return;
                 out.push(new docx.Table({
-                    rows: block.rows.map((row, rowIndex) => new docx.TableRow({
+                    rows: rows.map((row, rowIndex) => new docx.TableRow({
                         children: row.map(cell => new docx.TableCell({
                             children: [
                                 new docx.Paragraph({
@@ -2466,6 +2487,35 @@ class WordGenerator {
             }
         });
 
+        return out;
+    }
+
+    renderPdfNonMcQuestionBlock(question, displayNumber, isFirstQuestion) {
+        const q = question || {};
+        const blocks = Array.isArray(q.questionSheetBlocks) ? q.questionSheetBlocks : null;
+        if (blocks && blocks.length > 0) {
+            return this.renderStructuredPdfNonMcQuestionSheetBlocks(blocks, displayNumber, isFirstQuestion);
+        }
+
+        const out = [];
+        out.push(
+            new docx.Paragraph({
+                children: [new docx.TextRun({ text: `${displayNumber}. ${q.promptText || ''}`, size: 22 })],
+                spacing: { before: isFirstQuestion ? 0 : 250, after: 100 }
+            })
+        );
+        if (q.requiredText) {
+            out.push(
+                new docx.Paragraph({
+                    children: [new docx.TextRun({ text: 'Required:', bold: true, size: 20 })],
+                    spacing: { after: 50 }
+                })
+            );
+            out.push(...parser.renderMultilineTextAsParagraphs(q.requiredText, {
+                indent: { left: 400 },
+                spacing: { after: 100 }
+            }));
+        }
         return out;
     }
 
@@ -2856,7 +2906,11 @@ class WordGenerator {
             pdfNonMcSelected.forEach((q, idx) => {
                 const clean = this.sanitizePdfNonMcForQuestionSheet(q);
                 const displayNumber = baseNumber + idx + 1;
-                allChildren.push(...this.renderPdfNonMcQuestionBlock(clean, displayNumber, idx === 0));
+                if (Array.isArray(clean.questionSheetBlocks) && clean.questionSheetBlocks.length > 0) {
+                    allChildren.push(...this.renderStructuredPdfNonMcQuestionSheetBlocks(clean.questionSheetBlocks, displayNumber, idx === 0));
+                } else {
+                    allChildren.push(...this.renderPdfNonMcQuestionBlock(clean, displayNumber, idx === 0));
+                }
             });
         }
 
