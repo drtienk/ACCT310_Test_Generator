@@ -1037,27 +1037,32 @@ class PDFParser {
         var correctLetter = String.fromCharCode(97 + answerIndex);
         var stemParts = this._buildStemPartsFromLines(questionLines);
 
-        // Merge consecutive non-empty lines into flowing paragraphs.
-        // PDF hard line-breaks (from narrow column widths) produce mid-sentence
-        // breaks like "Which of the\n" + "following would be true".  Merge them
-        // so the Question Sheet renders flowing sentences.  Blank lines are kept
-        // as paragraph boundaries.
-        var mergedStemLines = [];
-        var currentPara = '';
-        for (var mi = 0; mi < questionLines.length; mi++) {
-            var mln = (questionLines[mi] || '').trim();
-            if (!mln) {
-                if (currentPara) { mergedStemLines.push(currentPara); currentPara = ''; }
-            } else {
-                currentPara = currentPara ? currentPara + ' ' + mln : mln;
+        // Merge consecutive non-empty lines into flowing paragraphs — but only
+        // when no stem table was detected.  When stemParts exists, tier 1
+        // rendering handles the structure (text + table parts) and needs the
+        // original per-line array intact.  Merging would destroy the table rows.
+        var finalStemLines;
+        if (stemParts && stemParts.length > 0) {
+            finalStemLines = questionLines.slice();
+        } else {
+            // No table — merge to remove PDF hard line-breaks mid-sentence.
+            finalStemLines = [];
+            var currentPara = '';
+            for (var mi = 0; mi < questionLines.length; mi++) {
+                var mln = (questionLines[mi] || '').trim();
+                if (!mln) {
+                    if (currentPara) { finalStemLines.push(currentPara); currentPara = ''; }
+                } else {
+                    currentPara = currentPara ? currentPara + ' ' + mln : mln;
+                }
             }
+            if (currentPara) finalStemLines.push(currentPara);
         }
-        if (currentPara) mergedStemLines.push(currentPara);
 
         return {
             originalId: questionId,
             questionText: questionText,
-            questionLinesArray: mergedStemLines,
+            questionLinesArray: finalStemLines,
             stemParts: stemParts,
             options: options,
             correctOption: correctLetter,
