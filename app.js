@@ -113,11 +113,46 @@ class PDFParser {
         if (!items || items.length === 0) return [];
 
         // 提取每個 item 的位置和文字
-        const positioned = items.map(item => {
+        var positioned = items.map(item => {
             const x = item.transform ? item.transform[4] : 0;
             const y = item.transform ? item.transform[5] : 0;
             return { x, y, str: item.str };
         });
+
+        // --- Merge stacked fractions (e.g. 2/10, n/30) ----------------------
+        // Accounting PDFs render credit terms like "2/10, n/30" as stacked
+        // fractions: numerator (higher Y) and denominator (lower Y) at nearly
+        // the same X, ~8-20 units apart vertically.  Detect pairs and merge
+        // them into "num/den" at the midpoint Y so they join the baseline text.
+        var fracRe = /^[0-9n]+$/i;
+        var consumed = {};
+        for (var fi = 0; fi < positioned.length; fi++) {
+            if (consumed[fi]) continue;
+            var a = positioned[fi];
+            if (!fracRe.test(a.str) || a.str.length > 3) continue;
+            for (var fj = fi + 1; fj < positioned.length; fj++) {
+                if (consumed[fj]) continue;
+                var b = positioned[fj];
+                if (!fracRe.test(b.str) || b.str.length > 3) continue;
+                var xGap = Math.abs(a.x - b.x);
+                var yGap = Math.abs(a.y - b.y);
+                if (xGap <= 5 && yGap >= 8 && yGap <= 20) {
+                    // Higher Y = numerator, lower Y = denominator
+                    var num = a.y > b.y ? a : b;
+                    var den = a.y > b.y ? b : a;
+                    positioned[fi] = {
+                        x: Math.min(a.x, b.x),
+                        y: (a.y + b.y) / 2,
+                        str: num.str + '/' + den.str
+                    };
+                    consumed[fj] = true;
+                    break;
+                }
+            }
+        }
+        if (Object.keys(consumed).length > 0) {
+            positioned = positioned.filter(function(_, idx) { return !consumed[idx]; });
+        }
 
         // 依 Y 座標降序排序（PDF 座標系 Y 從下往上），再依 X 升序
         positioned.sort((a, b) => {
