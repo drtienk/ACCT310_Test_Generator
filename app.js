@@ -1371,10 +1371,12 @@ class PDFParser {
         if (tableStart < 0) return null;
 
         // Collect consecutive data rows after header (or from tableStart)
+        // Lines longer than 80 characters are almost certainly paragraph text
+        // that happens to contain a number, not a real table row.
         var dataStart = hasExplicitHeader ? tableStart + 1 : tableStart;
         var tableEnd = dataStart;
         for (var i = dataStart; i < lines.length; i++) {
-            if (dataRowRe.test(lines[i])) { tableEnd = i + 1; } else { break; }
+            if (dataRowRe.test(lines[i]) && lines[i].length <= 80) { tableEnd = i + 1; } else { break; }
         }
         if (tableEnd <= dataStart) return null;
 
@@ -1420,8 +1422,9 @@ class PDFParser {
         // (e.g. "reported for $140,000 if the company had...") produce long
         // column values that are NOT pure numbers.  A "clean" numeric value
         // matches the pattern below (dollar amount, number, with optional
-        // trailing unit like "units" / "each" / "%").
-        var cleanNumRe = /^\$?-?[\d,]+(\.\d+)?(%| units| each)?$/;
+        // trailing unit like "units" / "each" / "%", or a quantity-at-price
+        // pattern like "400 units @ $22 each").
+        var cleanNumRe = /^\$?-?[\d,]+(\.\d+)?(%| units( @ \$[\d,]+(\.\d+)? each)?| each)?$/;
         var rowsWithCleanNumeric = 0;
         for (var r = 0; r < dataRows.length; r++) {
             for (var c = 1; c < dataRows[r].length; c++) {
@@ -1462,16 +1465,18 @@ class PDFParser {
         }
 
         // Token walk — value tokens start with $ or digit (but NOT day-of-month
-        // digits that follow a month name in the label column)
+        // digits that follow a month name in the label column, and NOT $price
+        // that follows an @ sign, since "400 units @ $22 each" is one value)
         var months = /^(january|february|march|april|may|june|july|august|september|october|november|december)$/i;
         var tokens = s.split(/\s+/);
         var cols = [];
         var current = '';
         var prevIsMonth = false;
+        var prevIsAt = false;
 
         for (var t = 0; t < tokens.length; t++) {
             var tok = tokens[t];
-            var startsValue = /^[\$@]/.test(tok) ||
+            var startsValue = /^\$/.test(tok) && !prevIsAt ||
                 (/^\d/.test(tok) && !prevIsMonth);
 
             if (startsValue && current !== '') {
@@ -1481,6 +1486,7 @@ class PDFParser {
                 current = current ? current + ' ' + tok : tok;
             }
             prevIsMonth = months.test(tok);
+            prevIsAt = tok === '@';
         }
         if (current) cols.push(current.trim());
 
