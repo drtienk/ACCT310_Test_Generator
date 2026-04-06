@@ -116,8 +116,8 @@ class PDFParser {
         var positioned = items.map(item => {
             const x = item.transform ? item.transform[4] : 0;
             const y = item.transform ? item.transform[5] : 0;
-            return { x, y, str: item.str };
-        });
+            return { x, y, str: item.str, width: item.width || 0 };
+        }).filter(function(p) { return p.str.trim().length > 0; });
 
         // --- Merge stacked fractions (e.g. 2/10, n/30) ----------------------
         // Accounting PDFs render credit terms like "2/10, n/30" as stacked
@@ -160,7 +160,8 @@ class PDFParser {
                     positioned[fi] = {
                         x: Math.min(a.x, b.x),
                         y: midY,
-                        str: num.str + '/' + den.str
+                        str: num.str + '/' + den.str,
+                        width: Math.max(a.width || 0, b.width || 0)
                     };
                     consumed[fj] = true;
                     break;
@@ -180,6 +181,26 @@ class PDFParser {
             return a.x - b.x; // X 升序（左邊的先）
         });
 
+        // --- Join items into a line using gap-based spacing ------------------
+        // PDF ligatures (fi, fl) are extracted as separate items with zero gap
+        // to adjacent text.  Real word boundaries have gaps >= 2.  Use the gap
+        // between consecutive items' X+width to decide whether to insert a
+        // space.  This naturally rejoins "fi" + "nancial" → "financial".
+        function joinLineByGap(lineItems) {
+            lineItems.sort(function(a, b) { return a.x - b.x; });
+            var text = '';
+            for (var ji = 0; ji < lineItems.length; ji++) {
+                if (ji === 0) {
+                    text = lineItems[ji].str;
+                } else {
+                    var prevEnd = lineItems[ji - 1].x + (lineItems[ji - 1].width || 0);
+                    var gap = lineItems[ji].x - prevEnd;
+                    text += (gap >= 2 ? ' ' : '') + lineItems[ji].str;
+                }
+            }
+            return text.trim();
+        }
+
         // 依 Y 座標分組成行（容差 3 單位）
         const lines = [];
         let currentLine = [];
@@ -192,8 +213,7 @@ class PDFParser {
             } else {
                 // 新的一行
                 if (currentLine.length > 0) {
-                    currentLine.sort((a, b) => a.x - b.x);
-                    const lineText = currentLine.map(i => i.str).join(' ').trim();
+                    const lineText = joinLineByGap(currentLine);
                     if (lineText) lines.push(lineText);
                 }
                 currentLine = [item];
@@ -203,8 +223,7 @@ class PDFParser {
 
         // 處理最後一行
         if (currentLine.length > 0) {
-            currentLine.sort((a, b) => a.x - b.x);
-            const lineText = currentLine.map(i => i.str).join(' ').trim();
+            const lineText = joinLineByGap(currentLine);
             if (lineText) lines.push(lineText);
         }
 
