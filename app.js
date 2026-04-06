@@ -124,8 +124,12 @@ class PDFParser {
         // fractions: numerator (higher Y) and denominator (lower Y) at nearly
         // the same X, ~8-20 units apart vertically.  Detect pairs and merge
         // them into "num/den" at the midpoint Y so they join the baseline text.
-        // Items must be at most 2 chars (e.g. "2", "10", "n", "30") to avoid
-        // false-matching table values like "150", "195" at the same X column.
+        // Guards:
+        //   - Items must be at most 2 chars (e.g. "2", "10", "n", "30")
+        //   - A baseline text item (str.length > 5) must exist within ±4 of
+        //     the pair's midpoint Y.  Real fractions sit above/below a text
+        //     line; table cell values in the same column have no baseline
+        //     between their rows.
         var fracRe = /^[0-9n]+$/i;
         var consumed = {};
         for (var fi = 0; fi < positioned.length; fi++) {
@@ -139,12 +143,23 @@ class PDFParser {
                 var xGap = Math.abs(a.x - b.x);
                 var yGap = Math.abs(a.y - b.y);
                 if (xGap <= 5 && yGap >= 8 && yGap <= 20) {
+                    // Check for a nearby baseline text item at the midpoint Y
+                    var midY = (a.y + b.y) / 2;
+                    var hasBaseline = false;
+                    for (var bk = 0; bk < positioned.length; bk++) {
+                        if (bk === fi || bk === fj || consumed[bk]) continue;
+                        if (positioned[bk].str.length > 5 && Math.abs(positioned[bk].y - midY) <= 4) {
+                            hasBaseline = true;
+                            break;
+                        }
+                    }
+                    if (!hasBaseline) continue;
                     // Higher Y = numerator, lower Y = denominator
                     var num = a.y > b.y ? a : b;
                     var den = a.y > b.y ? b : a;
                     positioned[fi] = {
                         x: Math.min(a.x, b.x),
-                        y: (a.y + b.y) / 2,
+                        y: midY,
                         str: num.str + '/' + den.str
                     };
                     consumed[fj] = true;
