@@ -1405,6 +1405,29 @@ class PDFParser {
 
         if (dataRows.length === 0) return null;
 
+        // --- Column alignment for Date / Purchases / Sales tables ------------
+        // When _splitDataRow produces only 2 columns [date, value] for a 3-col
+        // table, the value defaults to col 1 (Purchases).  But rows with plain
+        // "NNN units" (no "@ $") are Sales.  Detect this by checking whether
+        // ANY row has the "@ $" pricing pattern (a purchase); if so, rows
+        // without that pattern should have their value in the last column.
+        if (hasExplicitHeader && numCols === 3 && headerCols &&
+            /^Date$/i.test((headerCols[0] || '').trim())) {
+            var hasPurchaseRows = false;
+            for (var r = 0; r < dataRows.length; r++) {
+                if (/@ \$/.test(dataRows[r][1])) { hasPurchaseRows = true; break; }
+            }
+            if (hasPurchaseRows) {
+                for (var r = 0; r < dataRows.length; r++) {
+                    // Row has value in col 1 and empty col 2 → check if it's Sales
+                    if (dataRows[r][1] && !dataRows[r][2] && !/@ \$/.test(dataRows[r][1])) {
+                        dataRows[r][2] = dataRows[r][1];
+                        dataRows[r][1] = '';
+                    }
+                }
+            }
+        }
+
         // --- Guard: reject false-positive tables (long descriptive text) -----
         // Real tables have short label columns (item names like "Net sales",
         // "March 8", "Revolvers").  False positives are long descriptive
