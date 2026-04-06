@@ -1414,6 +1414,25 @@ class PDFParser {
         var avgFirstColLen = totalFirstColLen / dataRows.length;
         if (avgFirstColLen > 50) return null;
 
+        // --- Guard: require majority of data rows to have clean numeric cols --
+        // Real table cells beyond the label column contain pure numeric values
+        // like "$15,000" or "200".  Sentences with embedded dollar amounts
+        // (e.g. "reported for $140,000 if the company had...") produce long
+        // column values that are NOT pure numbers.  A "clean" numeric value
+        // matches the pattern below (dollar amount, number, with optional
+        // trailing unit like "units" / "each" / "%").
+        var cleanNumRe = /^\$?-?[\d,]+(\.\d+)?(%| units| each)?$/;
+        var rowsWithCleanNumeric = 0;
+        for (var r = 0; r < dataRows.length; r++) {
+            for (var c = 1; c < dataRows[r].length; c++) {
+                if (cleanNumRe.test(dataRows[r][c].trim())) {
+                    rowsWithCleanNumeric++;
+                    break;
+                }
+            }
+        }
+        if (dataRows.length > 0 && rowsWithCleanNumeric / dataRows.length < 0.5) return null;
+
         // --- Assemble stemParts ----------------------------------------------
         var parts = [];
         for (var i = 0; i < tableStart; i++) {
