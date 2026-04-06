@@ -124,16 +124,18 @@ class PDFParser {
         // fractions: numerator (higher Y) and denominator (lower Y) at nearly
         // the same X, ~8-20 units apart vertically.  Detect pairs and merge
         // them into "num/den" at the midpoint Y so they join the baseline text.
+        // Items must be at most 2 chars (e.g. "2", "10", "n", "30") to avoid
+        // false-matching table values like "150", "195" at the same X column.
         var fracRe = /^[0-9n]+$/i;
         var consumed = {};
         for (var fi = 0; fi < positioned.length; fi++) {
             if (consumed[fi]) continue;
             var a = positioned[fi];
-            if (!fracRe.test(a.str) || a.str.length > 3) continue;
+            if (!fracRe.test(a.str) || a.str.length > 2) continue;
             for (var fj = fi + 1; fj < positioned.length; fj++) {
                 if (consumed[fj]) continue;
                 var b = positioned[fj];
-                if (!fracRe.test(b.str) || b.str.length > 3) continue;
+                if (!fracRe.test(b.str) || b.str.length > 2) continue;
                 var xGap = Math.abs(a.x - b.x);
                 var yGap = Math.abs(a.y - b.y);
                 if (xGap <= 5 && yGap >= 8 && yGap <= 20) {
