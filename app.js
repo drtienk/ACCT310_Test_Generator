@@ -1582,18 +1582,25 @@ class PDFParser {
 
         // Token walk — value tokens start with $ or digit (but NOT day-of-month
         // digits that follow a month name in the label column, and NOT $price
-        // that follows an @ sign, since "400 units @ $22 each" is one value)
+        // that follows an @ sign, since "400 units @ $22 each" is one value,
+        // and NOT digits inside parenthesised text like "(due in 8 months)")
         var months = /^(january|february|march|april|may|june|july|august|september|october|november|december)$/i;
         var tokens = s.split(/\s+/);
         var cols = [];
         var current = '';
         var prevIsMonth = false;
         var prevIsAt = false;
+        var parenDepth = 0;
 
         for (var t = 0; t < tokens.length; t++) {
             var tok = tokens[t];
+            // Track parenthesis depth — count all ( and ) in this token
+            for (var pi = 0; pi < tok.length; pi++) {
+                if (tok[pi] === '(') parenDepth++;
+                else if (tok[pi] === ')') parenDepth--;
+            }
             var startsValue = /^\$/.test(tok) && !prevIsAt ||
-                (/^\d/.test(tok) && !prevIsMonth);
+                (/^\d/.test(tok) && !prevIsMonth && parenDepth === 0);
 
             if (startsValue && current !== '') {
                 cols.push(current.trim());
